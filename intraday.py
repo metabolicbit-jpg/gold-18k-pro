@@ -50,7 +50,7 @@ def _knn_hit(comp: np.ndarray, fwd: np.ndarray, current: float, k: int = 40, shr
     """نرخ بردِ جهتی در نزدیک‌ترین نمونه‌های گذشته، با شرینکِ اندازهٔ نمونه."""
     valid = (~np.isnan(comp)) & (~np.isnan(fwd))
     idx = np.where(valid)[0]
-    if len(idx) < 30 or current == 0:
+    if len(idx) < 30 or not current:
         return None
     nn = idx[np.argsort(np.abs(comp[idx] - current))[:k]]
     if len(nn) == 0:
@@ -79,34 +79,35 @@ def state(bars: pd.DataFrame, daily_comp: float = 0.0, sigma_daily: float = 0.01
     close = g["close"].astype(float)
     ret = np.log(close).diff()
     s5 = ret.ewm(span=24, adjust=False).std().iloc[-1]
-    if s5 is None or (isinstance(s5, float) and math.isnan(s5)) or s5 <= 0:
+    if s5 is None or (isinstance(s5, float) and math.isnan(s5)) or s5 <= 0 or pd.isna(s5):
         s5 = (sigma_daily or 0.012) / math.sqrt(288)
     s5 = float(s5)
     s1h = s5 * math.sqrt(BARS_PER_HOUR)
     out["sigma_5m"], out["sigma_1h"] = s5, s1h
 
+    zero = close * 0.0
     mom = close.pct_change(BARS_PER_HOUR)
-    mom_z = (mom / s1h) if s1h else mom * 0
+    mom_z = (mom / s1h).replace([np.inf, -np.inf], np.nan).fillna(0.0) if s1h else zero
     ma = close.rolling(BARS_PER_HOUR).mean()
-    dev_z = ((close - ma) / close / s1h) if s1h else close * 0
+    dev_z = (((close - ma) / close) / s1h).replace([np.inf, -np.inf], np.nan).fillna(0.0) if s1h else zero
 
-    mom_z = mom_z.fillna(0.0)
-    dev_z = dev_z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    comp_i = np.where(mom_z.abs() > 1, np.clip(mom_z, -1, 1), np.clip(-dev_z, -1, 1) * 0.7)
-    comp_series = 0.75 * comp_i + 0.25 * clip(daily_comp)
+    mv = mom_z.to_numpy(dtype=float)
+    dv = dev_z.to_numpy(dtype=float)
+    comp_i = np.where(np.abs(mv) > 1, np.clip(mv, -1, 1), np.clip(-dv, -1, 1) * 0.7)
+    cs = 0.75 * comp_i + 0.25 * clip(daily_comp)
+    fwd = (close.pct_change(BARS_PER_HOUR).shift(-BARS_PER_HOUR) * 100).to_numpy(dtype=float)
 
-    fwd = close.pct_change(BARS_PER_HOUR).shift(-BARS_PER_HOUR) * 100
+    out["mom_z"] = float(mv[-1])
+    out["dev_z"] = float(dv[-1])
+    out["comp"] = float(cs[-1])
 
-    out["mom_z"] = float(mom_z.iloc[-1])
-    out["dev_z"] = float(dev_z.iloc[-1])
-    out["comp"] = float(comp_series.iloc[-1])
-
-    hit = _knn_hit(comp_series.values, fwd.values, out["comp"])
+    hit = _knn_hit(cs, fwd, out["comp"])
     out["hit"] = hit
     if hit is not None:
-        out["p_up"] = float(np.clip(0.5 + np.sign(out["comp"]) * (hit - 0.5) * 0.9, 0.15, 0.85))
+        # جهت هرگز معکوس نمی‌شود؛ اگر تاریخچه تأیید نکند، احتمال به ۰٫۵ برمی‌گردد
+        out["p_up"] = float(np.clip(0.5 + np.sign(out["comp"]) * max(0.0, hit - 0.5) * 0.9, 0.15, 0.85))
     else:
-        out["p_up"] = 1.0 / (1.0 + math.exp(-1.1 * (out["comp"] / 0.6)))
+        out["p_up"] = float(np.clip(1.0 / (1.0 + math.exp(-1.1 * (out["comp"] / 0.6))), 0.15, 0.85))
 
     out["ready"] = len(g) >= MIN_BARS_READY
     return out
