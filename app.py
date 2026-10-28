@@ -1,9 +1,9 @@
 # ========== Gold18K Pro · app_v3.py ==========
 # 📂 مسیر ریپو: app_v3.py
-# نسخهٔ ۳.۲.۱ — نمایشی و بدون ارسال.
-# رفع تناقضِ «تصمیم فروش با احتمال رشد ۶۱٪»: تصمیم فقط از علامتِ لبه گرفته می‌شود (هم‌قاعده با بک‌تست)
-# و کالیبراسیون هرگز جهت را معکوس نمی‌کند؛ اگر جهتِ مدل در گذشته سود نداشته باشد، لبه صفر می‌شود.
-# فایل‌های همراه: collector.py (جمع‌آورِ کندل ۵ دقیقه‌ای) · intraday.py (موتور افق ساعتی)
+# نسخهٔ ۳.۳.۰ — نمایشی و بدون ارسال.
+# تازه: دو لایهٔ بین‌بازاری (شاخص دلار و نسبت طلا/نقره) از xasset.py؛ وزنشان هم مثل بقیه
+# از مهارت گذشتهٔ خودشان می‌آید، پس اگر اطلاعات تازه نداشته باشند وزن صفر می‌گیرند.
+# فایل‌های همراه: collector.py · intraday.py · xasset.py
 # وابستگی: streamlit>=1.41, requests, pandas, numpy, plotly, jdatetime
 
 from __future__ import annotations
@@ -26,13 +26,18 @@ from urllib3.util.retry import Retry
 
 try:
     import intraday as intr
-except Exception:  # اگر فایل همراه نبود، برنامه به تخمینِ روزانه برمی‌گردد
+except Exception:
     intr = None
+
+try:
+    import xasset
+except Exception:
+    xasset = None
 
 # ═══════════════ ۱) پیکربندی ═══════════════
 
 APP = "Gold18K Pro"
-VERSION = "3.2.1"
+VERSION = "3.3.0"
 BUILD = "1405-08-06"
 
 LIVE_API = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/popular.json"
@@ -66,11 +71,24 @@ CFG = {
     "ticks_per_day": 288,
 }
 
-STRATS = {"trend": "روند", "break": "شکست کانال", "value": "ارزش نسبی", "fx": "کانال ارزی"}
-ROLE = {"trend": "مومنتوم زمانی", "break": "شکست کانال ۲۰ روزه",
-        "value": "بازگشت نسبت طلا/دلار", "fx": "سرایت نرخ دلار"}
+STRATS = {
+    "trend": "روند",
+    "break": "شکست کانال",
+    "value": "ارزش نسبی",
+    "fx": "کانال ارزی",
+    "dxy": "فشار دلار جهانی",
+    "gsr": "کشش طلا به نقره",
+}
+ROLE = {
+    "trend": "مومنتوم زمانی",
+    "break": "شکست کانال ۲۰ روزه",
+    "value": "بازگشت نسبت طلا/دلار",
+    "fx": "سرایت نرخ دلار",
+    "dxy": "شاخص دلار و بازده اوراق",
+    "gsr": "نسبت طلا به نقره",
+}
 
-UA = {"User-Agent": "Gold18K-Pro/3.2"}
+UA = {"User-Agent": "Gold18K-Pro/3.3"}
 
 # ═══════════════ ۲) ابزار ═══════════════
 
@@ -393,6 +411,12 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
     d["s_value"] = ((-d["ratio_z"] / 1.5).clip(-1, 1)) * gate
     d["s_fx"] = (rz(d["usd_mom"], CFG["z_win"]) / 2).clip(-1, 1) * d["corr"].fillna(0).clip(0, 1)
 
+    # لایه‌های بین‌بازاری از ماژول همراه؛ اگر نبود، صفر می‌مانند و وزن نمی‌گیرند
+    d = xasset.augment(d) if xasset is not None else d
+    for k in ("dxy", "gsr"):
+        if f"s_{k}" not in d.columns:
+            d[f"s_{k}"] = 0.0
+
     H = CFG["horizon_days"]
     d["fwd"] = d["close"].pct_change(H, fill_method=None).shift(-H) * 100
 
@@ -412,12 +436,11 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fallback_prob(comp: np.ndarray) -> np.ndarray:
-    """نگاشتِ امتیاز به احتمال؛ همیشه هم‌جهت با علامتِ امتیاز."""
     return 1.0 / (1.0 + np.exp(-1.1 * (comp / 0.6)))
 
 
 def walk_probability(d: pd.DataFrame):
-    """کالیبراسیونِ جهتی؛ هرگز جهت را معکوس نمی‌کند. اگر جهتِ مدل در گذشته سود نداشته باشد، لبه صفر می‌شود."""
+    """کالیبراسیونِ جهتی؛ هرگز جهت را معکوس نمی‌کند."""
     H = CFG["horizon_days"]
     comp = np.nan_to_num(d["composite"].values, nan=0.0)
     fwd = d["fwd"].values
@@ -528,7 +551,6 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
     thr = CFG["cost_pct"] * CFG["cost_mult"]
     edge = (2 * p_now - 1) * 0.8 * sigma_d * 100 * math.sqrt(CFG["horizon_days"])
 
-    # تصمیم فقط از علامتِ لبه — هم‌قاعده با بک‌تست
     if edge >= thr:
         decision = "خرید"
     elif edge <= -thr:
@@ -569,6 +591,10 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
         ll=None if pd.isna(last["ll"]) else float(last["ll"]),
         ratio_z=None if pd.isna(last["ratio_z"]) else float(last["ratio_z"]),
         corr=None if pd.isna(last["corr"]) else float(last["corr"]),
+        gsr=None if "gsr" not in d.columns or pd.isna(last.get("gsr")) else float(last["gsr"]),
+        dxy=None if "dxy" not in d.columns or pd.isna(last.get("dxy")) else float(last["dxy"]),
+        prem_hist=None if "prem_hist" not in d.columns or pd.isna(last.get("prem_hist"))
+        else float(last["prem_hist"]),
         n_days=len(d),
     )
     return res
@@ -671,8 +697,8 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict, inta: dict | None = N
         f"سیگنال: {r['decision']}",
         f"احتمال رشد: {r['p_now'] * 100:.1f}٪ (آستانهٔ اطمینان {r['p_req'] * 100:.0f}٪)",
         f"لبه: {abs(r['edge']):.2f}٪ {r['edge_dir']} | هزینه: {CFG['cost_pct']:.2f}٪ | آستانه: {r['threshold']:.2f}٪",
-        f"رژیم: {r['regime']} | توافق: {r['agree']} از ۴",
-        f"برد تاریخی این جهت: " + (f"{r['hit'] * 100:.0f}٪" if r.get("hit") is not None else "نامشخص"),
+        f"رژیم: {r['regime']} | توافق: {r['agree']} از {len(STRATS)}",
+        "برد تاریخی این جهت: " + (f"{r['hit'] * 100:.0f}٪" if r.get("hit") is not None else "نامشخص"),
         f"وضعیت کالیبراسیون: {'فعال' if r['calib_on'] else 'در حال بلوغ'}",
         "──────────────", "لایه‌های استراتژی",
     ]
@@ -680,6 +706,8 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict, inta: dict | None = N
         sk = r["skills"].get(k)
         L.append(f"{name}: امتیاز {r['sides'][k]:+.2f} | وزن {r['weights'][k] * 100:.0f}٪"
                  + (f" | مهارت اخیر {sk:+.2f}٪" if sk is not None else ""))
+    if r.get("gsr") is not None or r.get("dxy") is not None:
+        L.append(f"بین‌بازاری: نسبت طلا/نقره {fmt(r.get('gsr'), 2)} | شاخص دلار {fmt(r.get('dxy'), 1)}")
     L += ["──────────────", "پیش‌بینی"]
     if inta and inta.get("ready") and intr:
         hb = intr.hourly_band(r["price"], inta["sigma_1h"], inta["comp"])
@@ -708,7 +736,7 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict, inta: dict | None = N
     else:
         L.append("معامله‌ای در پنجرهٔ آزمون ثبت نشد.")
     L += ["──────────────",
-          f"کیفیت داده: {r['n_days']} روز تاریخ · {inta.get('n', 0) if inta else 0} کندل ۵ دقیقه‌ای · "
+          f"کیفیت داده: {r['n_days']} روز تاریخ · {inta.get('n', 0) if inta else 0} کندل درون‌روزی · "
           f"بروزرسانی {age_txt(live.get('at'))}",
           "این گزارش تحلیلی است و توصیهٔ سرمایه‌گذاری نیست."]
     return "\n".join(L)
@@ -926,7 +954,7 @@ def main():
     flat = (r.get("hit") is not None and r["hit"] < 0.5)
     if abs(r["edge"]) < r["threshold"]:
         if flat:
-            gap_txt = (f'جهتِ مدل در این ناحیه تاریخی برد زیر ۵۰٪ داشته، پس لبه صفر گرفته شده است. '
+            gap_txt = ('جهتِ مدل در این ناحیه تاریخی برد زیر ۵۰٪ داشته، پس لبه صفر گرفته شده است. '
                        f'برای ورود لازم است اطمینان ≥ <b class="num">{r["p_req"] * 100:.0f}٪</b> باشد.')
         else:
             gap_txt = (f'برای ورود لازم است اطمینان ≥ <b class="num">{r["p_req"] * 100:.0f}٪</b> باشد؛ '
@@ -950,7 +978,7 @@ def main():
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <span class="pill">رژیم: {r['regime']}</span>
-      <span class="pill">توافق {r['agree']} از ۴</span>
+      <span class="pill">توافق {r['agree']} از {len(STRATS)}</span>
       <span class="pill">اطمینان {r['conf']:.0f}٪</span>
       {ipill}
     </div>
@@ -981,8 +1009,8 @@ def main():
     # ═══ نمای کلی
     if page == "نمای کلی":
         ok_dir = abs(r["comp"]) >= 0.15
-        ok_edge = abs(r["edge"]) >= r["threshold"]
         ok_hit = r.get("hit") is not None and r["hit"] >= 0.5
+        ok_edge = abs(r["edge"]) >= r["threshold"]
         ok_agree = r["agree"] >= 3
         left, right = st.columns([1.35, 1])
         with left:
@@ -996,7 +1024,7 @@ def main():
                 (ok_edge, "لبه از هزینه بیشتر است" if ok_edge else "لبه کمتر از هزینه است",
                  f"لبه {abs(r['edge']):.2f}٪ {r['edge_dir']} در برابر آستانهٔ {r['threshold']:.2f}٪"),
                 (ok_agree, "استراتژی‌ها هم‌جهت‌اند" if ok_agree else "استراتژی‌ها هم‌جهت نیستند",
-                 f"{r['agree']} از ۴ لایه هم‌جهت‌اند" + ("" if ok_agree else " — وزن سیگنال پایین است")),
+                 f"{r['agree']} از {len(STRATS)} لایه هم‌جهت‌اند" + ("" if ok_agree else " — وزن سیگنال پایین است")),
                 (r["calib_on"], "کالیبراسیون بالغ است" if r["calib_on"] else "کالیبراسیون در حال بلوغ",
                  f"{r['calib_share'] * 100:.0f}٪ ردیف‌ها نمونهٔ معتبر داشتند"),
             ]), unsafe_allow_html=True)
@@ -1057,7 +1085,8 @@ def main():
             "نقش": ROLE[k],
         } for k in STRATS]), use_container_width=True, hide_index=True)
         st.caption("وزن هر لایه از عملکرد گذشتهٔ خودش می‌آید (میانگین نمایی، عقب‌افتاده به اندازهٔ افق)؛ "
-                   "لایهٔ بی‌مهارت وزن نزدیک صفر می‌گیرد.")
+                   "لایهٔ بی‌مهارت وزن نزدیک صفر می‌گیرد. دو لایهٔ بین‌بازاری هم همین قاعده را دارند: "
+                   "اگر اطلاعات تازه نداشته باشند، وزنشان صفر می‌شود.")
 
         st.write("")
         st.markdown('<div class="h">ارزش انتظاری و حساسیت به افق</div>', unsafe_allow_html=True)
@@ -1107,23 +1136,24 @@ def main():
                           "نوسان دوره": f"{q['sig']:.2f}٪"})
         st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
         if inta.get("ready"):
-            st.caption("افق یک‌ساعته از کندل‌های ۵ دقیقه‌ای خودمان محاسبه شده؛ افق‌های روزانه از تاریخ روزانه.")
+            st.caption("افق یک‌ساعته از کندل‌های درون‌روزی خودمان محاسبه شده؛ افق‌های روزانه از تاریخ روزانه.")
         else:
-            st.caption(f"افق یک‌ساعته هنوز تقریبی است: {inta.get('n', 0)} کندل ۵ دقیقه‌ای داریم و "
-                       f"{CFG['min_bars_ready']} لازم است. افق روزانه از تاریخ روزانه می‌آید و مستقل است.")
+            st.caption(f"افق یک‌ساعته هنوز تقریبی است: {inta.get('n', 0)} کندل درون‌روزی داریم و "
+                       f"{inta.get('bars_needed', CFG['min_bars_ready'])} لازم است.")
 
         if inta.get("ready"):
             st.write("")
             st.markdown('<div class="h">تصویر درون‌روزی</div>', unsafe_allow_html=True)
             st.markdown(rows([
-                ("نوسان ۵ دقیقه", f"{inta['sigma_5m'] * 100:.3f}٪"),
+                ("بازهٔ کندل", f"{inta.get('step_min', 5):.0f} دقیقه"),
+                ("نوسان هر کندل", f"{inta['sigma_5m'] * 100:.3f}٪"),
                 ("نوسان ۱ ساعت", f"{inta['sigma_1h'] * 100:.2f}٪"),
                 ("مومنتوم ۱ ساعت (z)", f"{inta['mom_z']:+.2f}"),
                 ("انحراف از میانگین (z)", f"{inta['dev_z']:+.2f}"),
                 ("امتیاز درون‌روزی", f"{inta['comp']:+.2f}"),
                 ("نرخ برد جهتی (تاریخی)", "—" if inta["hit"] is None else f"{inta['hit'] * 100:.0f}٪"),
             ]), unsafe_allow_html=True)
-            st.caption(f"{inta['n']} کندل ۵ دقیقه‌ای · آخرین کندل {inta['last']}")
+            st.caption(f"{inta['n']} کندل · آخرین کندل {inta['last']}")
 
         st.write("")
         p = r["panel"]
@@ -1210,6 +1240,8 @@ def main():
              live.get("silver") is not None),
             ("مس", fmt(safe_float((live.get("copper") or {}).get("price")), 3), "gold-api",
              live.get("copper") is not None),
+            ("شاخص دلار", fmt(r.get("dxy"), 1), "yahoo (xasset)", r.get("dxy") is not None),
+            ("نسبت طلا/نقره", fmt(r.get("gsr"), 1), "yahoo (xasset)", r.get("gsr") is not None),
         ], columns=["قلم", "مقدار", "منبع", "دریافت شد"]), use_container_width=True, hide_index=True)
         st.caption(f"آخرین دریافت {fresh} · تاریخ روزانه {r['n_days']} روز · نمونه‌های محلی {len(ticks)}")
 
@@ -1217,20 +1249,23 @@ def main():
         st.markdown('<div class="h">آمادگی داده</div>', unsafe_allow_html=True)
         days_ok = r["n_days"] >= CFG["min_days_reliable"]
         nb = int(inta.get("n", 0))
+        need = int(inta.get("bars_needed", CFG["min_bars_ready"]))
         items = [
             (days_ok, f"تاریخ روزانه: {r['n_days']} روز",
              "کافی برای سیگنال روزانه" if days_ok else f"حداقل {CFG['min_days_reliable']} روز لازم است"),
+            (r.get("dxy") is not None, "بین‌بازاری: شاخص دلار و طلا/نقره",
+             "متصل" if r.get("dxy") is not None else "xasset.py داده نگرفت؛ لایه‌ها صفر مانده‌اند"),
             (len(ticks) >= 40, f"نمونهٔ محلی: {len(ticks)}",
              "برای z پریمیوم و تغییر لحظه‌ای استفاده می‌شود"),
-            (nb >= CFG["min_bars_ready"], f"کندل ۵ دقیقه‌ای: {nb} از {CFG['min_bars_ready']}",
-             "افق یک‌ساعته از دادهٔ واقعی محاسبه می‌شود" if nb >= CFG["min_bars_ready"]
+            (nb >= need, f"کندل درون‌روزی: {nb} از {need}",
+             "افق یک‌ساعته از دادهٔ واقعی محاسبه می‌شود" if nb >= need
              else "با رسیدن به این حد، افق یک‌ساعته واقعی می‌شود"),
         ]
         if intr is None:
-            items.append((False, "intraday.py پیدا نشد", "فایل همراه را کنار app.py در ریپو بگذار"))
+            items.append((False, "intraday.py پیدا نشد", "فایل همراه را کنار app.py بگذار"))
+        if xasset is None:
+            items.append((False, "xasset.py پیدا نشد", "فایل همراه را کنار app.py بگذار"))
         st.markdown(why_block(items), unsafe_allow_html=True)
-        st.caption("برای جمع‌آوری پیوسته، collector.py باید روی سروری با اجرای مستمر بماند؛ "
-                   "باز بودن صفحه کافی نیست.")
 
         st.write("")
         st.markdown('<div class="h">گزارش کامل</div>', unsafe_allow_html=True)
