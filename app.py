@@ -1,8 +1,8 @@
 # ========== Gold18K Pro · app_v3.py ==========
 # 📂 مسیر ریپو: app_v3.py
-# نسخهٔ ۳.۳.۰ — نمایشی و بدون ارسال.
-# تازه: دو لایهٔ بین‌بازاری (شاخص دلار و نسبت طلا/نقره) از xasset.py؛ وزنشان هم مثل بقیه
-# از مهارت گذشتهٔ خودشان می‌آید، پس اگر اطلاعات تازه نداشته باشند وزن صفر می‌گیرند.
+# نسخهٔ ۳.۳.۱ — نمایشی و بدون ارسال.
+# رفع باگِ وزن: لایه‌ای که اصلاً داده ندارد (مهارت نامعلوم) وزن صفر می‌گیرد؛
+# قبلاً به اشتباه سهم مساوی می‌گرفت و ۲۰٪ از سیگنال را رقیق می‌کرد.
 # فایل‌های همراه: collector.py · intraday.py · xasset.py
 # وابستگی: streamlit>=1.41, requests, pandas, numpy, plotly, jdatetime
 
@@ -37,7 +37,7 @@ except Exception:
 # ═══════════════ ۱) پیکربندی ═══════════════
 
 APP = "Gold18K Pro"
-VERSION = "3.3.0"
+VERSION = "3.3.1"
 BUILD = "1405-08-06"
 
 LIVE_API = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/popular.json"
@@ -426,9 +426,12 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
         return contrib.ewm(span=CFG["ew_span"], min_periods=10).mean().shift(H + 1)
 
     sk = pd.DataFrame({k: skill(f"s_{k}") for k in STRATS})
-    w = np.exp(sk.fillna(0.0) * 1.0)
-    w = w.div(w.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    # لایهٔ بی‌داده (مهارت نامعلوم) سهم نمی‌گیرد؛ وگرنه مثل لایهٔ بی‌مهارت وزن مساوی می‌گرفت و سیگنال را رقیق می‌کرد
+    w = np.exp(sk.fillna(0.0)) * sk.notna()
+    tot = w.sum(axis=1).replace(0, np.nan)
+    w = w.div(tot, axis=0).fillna(0.0)
     d["composite"] = (w.values * d[[f"s_{k}" for k in STRATS]].values).sum(axis=1)
+    d.loc[tot.isna(), "composite"] = np.nan
     for k in STRATS:
         d[f"w_{k}"] = w[k].values
         d[f"k_{k}"] = sk[k].values
@@ -667,7 +670,7 @@ def signal_text(r: dict, fc: dict, plan: dict, inta: dict | None = None) -> str:
     if inta and inta.get("ready") and intr:
         hb = intr.hourly_band(r["price"], inta["sigma_1h"], inta["comp"])
         if hb:
-            L.append(f"• ۱ ساعت (کندل ۵ دقیقه): {fmt(hb['lo'])} تا {fmt(hb['hi'])} "
+            L.append(f"• ۱ ساعت (کندل درون‌روزی): {fmt(hb['lo'])} تا {fmt(hb['hi'])} "
                      f"(میانه {fmt(hb['med'])}) · جهت {inta['p_up'] * 100:.0f}٪ صعود")
     for label, q in fc.items():
         if label == "۱ ساعت" and inta and inta.get("ready"):
@@ -705,7 +708,7 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict, inta: dict | None = N
     for k, name in STRATS.items():
         sk = r["skills"].get(k)
         L.append(f"{name}: امتیاز {r['sides'][k]:+.2f} | وزن {r['weights'][k] * 100:.0f}٪"
-                 + (f" | مهارت اخیر {sk:+.2f}٪" if sk is not None else ""))
+                 + (f" | مهارت اخیر {sk:+.2f}٪" if sk is not None else " | بدون داده"))
     if r.get("gsr") is not None or r.get("dxy") is not None:
         L.append(f"بین‌بازاری: نسبت طلا/نقره {fmt(r.get('gsr'), 2)} | شاخص دلار {fmt(r.get('dxy'), 1)}")
     L += ["──────────────", "پیش‌بینی"]
@@ -1084,9 +1087,8 @@ def main():
             "مهارت اخیر": "—" if r["skills"][k] is None else f"{r['skills'][k]:+.2f}٪",
             "نقش": ROLE[k],
         } for k in STRATS]), use_container_width=True, hide_index=True)
-        st.caption("وزن هر لایه از عملکرد گذشتهٔ خودش می‌آید (میانگین نمایی، عقب‌افتاده به اندازهٔ افق)؛ "
-                   "لایهٔ بی‌مهارت وزن نزدیک صفر می‌گیرد. دو لایهٔ بین‌بازاری هم همین قاعده را دارند: "
-                   "اگر اطلاعات تازه نداشته باشند، وزنشان صفر می‌شود.")
+        st.caption("وزن هر لایه از مهارت گذشتهٔ خودش می‌آید؛ لایهٔ بی‌مهارت — یا لایه‌ای که داده ندارد — "
+                   "وزن صفر می‌گیرد و سیگنال را رقیق نمی‌کند.")
 
         st.write("")
         st.markdown('<div class="h">ارزش انتظاری و حساسیت به افق</div>', unsafe_allow_html=True)
@@ -1240,8 +1242,8 @@ def main():
              live.get("silver") is not None),
             ("مس", fmt(safe_float((live.get("copper") or {}).get("price")), 3), "gold-api",
              live.get("copper") is not None),
-            ("شاخص دلار", fmt(r.get("dxy"), 1), "yahoo (xasset)", r.get("dxy") is not None),
-            ("نسبت طلا/نقره", fmt(r.get("gsr"), 1), "yahoo (xasset)", r.get("gsr") is not None),
+            ("شاخص دلار", fmt(r.get("dxy"), 1), "xasset", r.get("dxy") is not None),
+            ("نسبت طلا/نقره", fmt(r.get("gsr"), 1), "xasset", r.get("gsr") is not None),
         ], columns=["قلم", "مقدار", "منبع", "دریافت شد"]), use_container_width=True, hide_index=True)
         st.caption(f"آخرین دریافت {fresh} · تاریخ روزانه {r['n_days']} روز · نمونه‌های محلی {len(ticks)}")
 
@@ -1254,7 +1256,8 @@ def main():
             (days_ok, f"تاریخ روزانه: {r['n_days']} روز",
              "کافی برای سیگنال روزانه" if days_ok else f"حداقل {CFG['min_days_reliable']} روز لازم است"),
             (r.get("dxy") is not None, "بین‌بازاری: شاخص دلار و طلا/نقره",
-             "متصل" if r.get("dxy") is not None else "xasset.py داده نگرفت؛ لایه‌ها صفر مانده‌اند"),
+             "متصل و فعال" if r.get("dxy") is not None
+             else "داده نرسید؛ لایه‌ها وزن صفر گرفتند و سیگنال رقیق نشد"),
             (len(ticks) >= 40, f"نمونهٔ محلی: {len(ticks)}",
              "برای z پریمیوم و تغییر لحظه‌ای استفاده می‌شود"),
             (nb >= need, f"کندل درون‌روزی: {nb} از {need}",
