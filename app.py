@@ -46,16 +46,52 @@ html, body, [class*="css"], .stMarkdown, div {
 </style>
 """, unsafe_allow_html=True)
 
-# ====================== منابع داده ======================
+# ====================== منابع ======================
 LIVE_API = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/popular.json"
 HISTORY_USD = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/history/USD_IRR_FREE.json"
 HISTORY_GOLD18 = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/history/GOLD_18K_IRR.json"
-OUNCE_API = "https://api.gold-api.com/price/XAU"
+METAL_API = "https://api.gold-api.com/price/{}"
 
 
-@st.cache_data(ttl=35, show_spinner=False)
+def to_jalali(dt=None):
+    if dt is None:
+        dt = datetime.now()
+    try:
+        import jdatetime
+        j = jdatetime.datetime.fromgregorian(datetime=dt)
+        return j.strftime("%Y/%m/%d"), j.strftime("%H:%M")
+    except Exception:
+        g_y, g_m, g_d = dt.year, dt.month, dt.day
+        gy2 = g_y - 1600
+        days = 365 * gy2 + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400
+        md = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+        days += md[g_m - 1] + g_d - 1
+        if g_m > 2 and ((g_y % 4 == 0 and g_y % 100 != 0) or g_y % 400 == 0):
+            days += 1
+        j_days = days - 79
+        j_np = j_days // 12053
+        j_days %= 12053
+        j_y = 979 + 33 * j_np + 4 * (j_days // 1461)
+        j_days %= 1461
+        if j_days >= 366:
+            j_y += (j_days - 1) // 365
+            j_days = (j_days - 1) % 365
+        if j_days < 186:
+            j_m = 1 + j_days // 31
+            j_d = 1 + j_days % 31
+        else:
+            j_m = 7 + (j_days - 186) // 30
+            j_d = 1 + (j_days - 186) % 30
+        return f"{j_y:04d}/{j_m:02d}/{j_d:02d}", dt.strftime("%H:%M")
+
+
+@st.cache_data(ttl=40, show_spinner=False)
 def fetch_live():
-    out = {"usd": None, "gold18": None, "ounce": None, "ts": datetime.now().strftime("%H:%M")}
+    out = {
+        "usd": None, "gold18": None,
+        "ounce": None, "silver": None, "copper": None,
+        "ts": datetime.now().strftime("%H:%M")
+    }
     try:
         items = requests.get(LIVE_API, timeout=9).json().get("data", [])
         for it in items:
@@ -66,12 +102,14 @@ def fetch_live():
                 out["gold18"] = {"price": float(it.get("price", 0)), "chg": it.get("change_pct")}
     except:
         pass
-    try:
-        r = requests.get(OUNCE_API, timeout=7)
-        if r.status_code == 200:
-            out["ounce"] = {"price": float(r.json().get("price", 0))}
-    except:
-        pass
+
+    for key, sym in [("ounce", "XAU"), ("silver", "XAG"), ("copper", "HG")]:
+        try:
+            r = requests.get(METAL_API.format(sym), timeout=7)
+            if r.status_code == 200:
+                out[key] = {"price": float(r.json().get("price", 0))}
+        except:
+            pass
     return out
 
 
@@ -102,7 +140,6 @@ def theoretical(ounce, usd):
     return (ounce * usd / 31.1035) * 0.75
 
 
-# ====================== موتور تحلیل جدید ======================
 def intelligence_engine(live, history):
     gold = live.get("gold18") or {}
     usd = live.get("usd") or {}
@@ -116,25 +153,18 @@ def intelligence_engine(live, history):
 
     theo = theoretical(o_price, u_price)
     prem = ((g_price - theo) / theo * 100) if theo and g_price else None
+    z_prem = (prem / 2.8) if prem is not None else None
 
     vol = corr = mom3 = mom5 = mom10 = None
-    z_prem = None
-
     if history is not None and len(history) > 15:
         rets_g = history["gold18"].pct_change().dropna()
         rets_u = history["usd"].pct_change().dropna()
-
         vol = rets_g.tail(10).std() * 100
         corr = rets_g.corr(rets_u)
         mom3 = (history["gold18"].iloc[-1] / history["gold18"].iloc[-4] - 1) * 100
         mom5 = (history["gold18"].iloc[-1] / history["gold18"].iloc[-6] - 1) * 100
         mom10 = (history["gold18"].iloc[-1] / history["gold18"].iloc[-11] - 1) * 100
 
-    # Z-Score پریمیوم (فرض میانگین ≈ 0 و انحراف معیار تاریخی ≈ 2.8٪)
-    if prem is not None:
-        z_prem = prem / 2.8
-
-    # ----- امتیاز چندعاملی -----
     score = 0.0
     factors = []
 
@@ -177,10 +207,8 @@ def intelligence_engine(live, history):
         elif vol > 2.3:
             vol_penalty = 0.80
             factors.append(("نوسان بالا", 0, f"نوسان {vol:.1f}% → احتیاط"))
-
     score *= vol_penalty
 
-    # رژیم و سیگنال
     if score >= 2.6:
         regime, signal, conf = "صعودی قوی", "خرید قوی", min(93, 70 + score * 7)
     elif score >= 1.1:
@@ -192,154 +220,115 @@ def intelligence_engine(live, history):
     else:
         regime, signal, conf = "رنج / نامشخص", "خنثی / نظاره‌گر", 48 + abs(score) * 6
 
-    # ----- پیش‌بینی با محدوده و وزن‌های پویا -----
+    p_up = max(15, min(85, 50 + score * 12))
+    p_down = 100 - p_up
+
     pred = None
     if history is not None and len(history) > 14 and g_price:
         rets = history["gold18"].pct_change().dropna()
         short = rets.tail(3).mean()
         med = rets.tail(8).mean()
         usd_s = history["usd"].pct_change().tail(3).mean()
-
         if abs(score) >= 2.0:
             w_short, w_med, w_usd, w_prem = 0.42, 0.22, 0.28, 0.08
         elif abs(score) >= 1.0:
             w_short, w_med, w_usd, w_prem = 0.35, 0.25, 0.30, 0.10
         else:
             w_short, w_med, w_usd, w_prem = 0.25, 0.25, 0.25, 0.25
-
         corr_safe = corr if corr is not None and not np.isnan(corr) else 0.55
-        expected = (w_short * short +
-                    w_med * med +
-                    w_usd * (usd_s * corr_safe) +
+        expected = (w_short * short + w_med * med + w_usd * (usd_s * corr_safe) +
                     w_prem * (-0.15 * (z_prem if z_prem else 0) / 100))
-
         daily_vol = rets.tail(10).std()
         if daily_vol is None or np.isnan(daily_vol):
             daily_vol = 0.012
-
-        hour_p = g_price * (1 + expected * 0.18)
         d1_p = g_price * (1 + expected * 0.90)
         d3_p = g_price * (1 + expected * 2.15)
-
-        d1_low = d1_p * (1 - daily_vol * 1.05)
-        d1_high = d1_p * (1 + daily_vol * 1.05)
-        d3_low = d3_p * (1 - daily_vol * 1.7)
-        d3_high = d3_p * (1 + daily_vol * 1.7)
-
         pred = {
-            "hour": hour_p,
-            "d1": d1_p, "d1_low": d1_low, "d1_high": d1_high,
-            "d3": d3_p, "d3_low": d3_low, "d3_high": d3_high,
+            "d1": d1_p,
+            "d1_low": d1_p * (1 - daily_vol * 1.05),
+            "d1_high": d1_p * (1 + daily_vol * 1.05),
+            "d3": d3_p,
+            "d3_low": d3_p * (1 - daily_vol * 1.7),
+            "d3_high": d3_p * (1 + daily_vol * 1.7),
             "expected_daily": expected * 100,
-            "weights": {"short": w_short, "med": w_med, "usd": w_usd, "prem": w_prem}
         }
 
     return {
         "theo": theo, "prem": prem, "z_prem": z_prem,
-        "vol": vol, "corr": corr,
-        "mom3": mom3, "mom5": mom5, "mom10": mom10,
+        "vol": vol, "corr": corr, "mom3": mom3, "mom5": mom5, "mom10": mom10,
         "score": score, "factors": factors,
         "regime": regime, "signal": signal, "confidence": conf,
-        "pred": pred
+        "p_up": p_up, "p_down": p_down, "pred": pred
     }
 
 
-def scenario(gold_price, usd_price, ounce_price, usd_change_pct):
-    if not all([gold_price, usd_price, ounce_price]):
-        return None
-    new_usd = usd_price * (1 + usd_change_pct / 100)
-    new_theo = theoretical(ounce_price, new_usd)
-    estimated_gold = gold_price * (1 + usd_change_pct / 100 * 0.7)
-    return {"new_usd": new_usd, "new_theo": new_theo, "est_gold": estimated_gold}
-
-
-# ====================== چک‌لیست حرفه‌ای روزانه ======================
 def run_daily_checklist(live, intel):
-    checks = []
-    total_score = 0
-    max_score = 0
+    checks, total_score, max_score = [], 0, 0
 
-    # ۱. ارزش‌گذاری
     max_score += 2
     if intel.get("z_prem") is not None:
         z = intel["z_prem"]
         if z <= -1.5:
-            checks.append(("ارزش‌گذاری", "✅ عالی", f"Z-Score={z:.2f} → طلای داخلی ارزان نسبی", 2))
-            total_score += 2
+            checks.append(("ارزش‌گذاری", "✅ عالی", f"Z={z:.2f}", 2)); total_score += 2
         elif z <= -0.7:
-            checks.append(("ارزش‌گذاری", "✅ خوب", f"Z-Score={z:.2f} → ارزش نسبی مناسب", 1))
-            total_score += 1
+            checks.append(("ارزش‌گذاری", "✅ خوب", f"Z={z:.2f}", 1)); total_score += 1
         elif z >= 1.5:
-            checks.append(("ارزش‌گذاری", "❌ ضعیف", f"Z-Score={z:.2f} → طلای داخلی گران", 0))
+            checks.append(("ارزش‌گذاری", "❌ ضعیف", f"Z={z:.2f}", 0))
         else:
-            checks.append(("ارزش‌گذاری", "⚪ خنثی", f"Z-Score={z:.2f} → در محدوده نرمال", 1))
-            total_score += 1
+            checks.append(("ارزش‌گذاری", "⚪ خنثی", f"Z={z:.2f}", 1)); total_score += 1
     else:
-        checks.append(("ارزش‌گذاری", "⚪ نامشخص", "داده کافی برای Z-Score نیست", 0))
+        checks.append(("ارزش‌گذاری", "⚪ نامشخص", "—", 0))
 
-    # ۲. مومنتوم
     max_score += 2
     mom5 = intel.get("mom5")
     if mom5 is not None:
         if mom5 > 2.5:
-            checks.append(("مومنتوم", "✅ قوی صعودی", f"تغییر ۵روزه: {mom5:+.1f}%", 2))
-            total_score += 2
+            checks.append(("مومنتوم", "✅ قوی صعودی", f"{mom5:+.1f}%", 2)); total_score += 2
         elif mom5 > 0.8:
-            checks.append(("مومنتوم", "✅ ملایم صعودی", f"تغییر ۵روزه: {mom5:+.1f}%", 1))
-            total_score += 1
+            checks.append(("مومنتوم", "✅ ملایم صعودی", f"{mom5:+.1f}%", 1)); total_score += 1
         elif mom5 < -2.5:
-            checks.append(("مومنتوم", "❌ قوی نزولی", f"تغییر ۵روزه: {mom5:+.1f}%", 0))
+            checks.append(("مومنتوم", "❌ قوی نزولی", f"{mom5:+.1f}%", 0))
         elif mom5 < -0.8:
-            checks.append(("مومنتوم", "❌ ملایم نزولی", f"تغییر ۵روزه: {mom5:+.1f}%", 0))
+            checks.append(("مومنتوم", "❌ ملایم نزولی", f"{mom5:+.1f}%", 0))
         else:
-            checks.append(("مومنتوم", "⚪ خنثی", f"تغییر ۵روزه: {mom5:+.1f}%", 1))
-            total_score += 1
+            checks.append(("مومنتوم", "⚪ خنثی", f"{mom5:+.1f}%", 1)); total_score += 1
     else:
-        checks.append(("مومنتوم", "⚪ نامشخص", "داده ناکافی", 0))
+        checks.append(("مومنتوم", "⚪ نامشخص", "—", 0))
 
-    # ۳. همبستگی
     max_score += 2
     corr = intel.get("corr")
     if corr is not None:
         if corr > 0.75:
-            checks.append(("همبستگی", "✅ بالا و قابل اتکا", f"همبستگی: {corr:.2f}", 2))
-            total_score += 2
+            checks.append(("همبستگی", "✅ بالا", f"{corr:.2f}", 2)); total_score += 2
         elif corr > 0.50:
-            checks.append(("همبستگی", "✅ متوسط", f"همبستگی: {corr:.2f}", 1))
-            total_score += 1
+            checks.append(("همبستگی", "✅ متوسط", f"{corr:.2f}", 1)); total_score += 1
         else:
-            checks.append(("همبستگی", "⚠️ پایین", f"همبستگی: {corr:.2f} → پیش‌بینی سخت‌تر", 0))
+            checks.append(("همبستگی", "⚠️ پایین", f"{corr:.2f}", 0))
     else:
-        checks.append(("همبستگی", "⚪ نامشخص", "داده ناکافی", 0))
+        checks.append(("همبستگی", "⚪ نامشخص", "—", 0))
 
-    # ۴. نوسان
     max_score += 2
     vol = intel.get("vol")
     if vol is not None:
         if vol < 1.8:
-            checks.append(("نوسان", "✅ آرام", f"نوسان ۱۰روزه: {vol:.1f}%", 2))
-            total_score += 2
+            checks.append(("نوسان", "✅ آرام", f"{vol:.1f}%", 2)); total_score += 2
         elif vol < 2.6:
-            checks.append(("نوسان", "✅ قابل قبول", f"نوسان ۱۰روزه: {vol:.1f}%", 1))
-            total_score += 1
+            checks.append(("نوسان", "✅ قابل قبول", f"{vol:.1f}%", 1)); total_score += 1
         else:
-            checks.append(("نوسان", "⚠️ بالا", f"نوسان ۱۰روزه: {vol:.1f}% → ریسک بیشتر", 0))
+            checks.append(("نوسان", "⚠️ بالا", f"{vol:.1f}%", 0))
     else:
-        checks.append(("نوسان", "⚪ نامشخص", "داده ناکافی", 0))
+        checks.append(("نوسان", "⚪ نامشخص", "—", 0))
 
-    # ۵. قدرت سیگنال
     max_score += 2
     conf = intel.get("confidence", 0)
     if conf >= 75:
-        checks.append(("قدرت سیگنال", "✅ قوی", f"اطمینان: {conf:.0f}%", 2))
-        total_score += 2
+        checks.append(("قدرت سیگنال", "✅ قوی", f"{conf:.0f}%", 2)); total_score += 2
     elif conf >= 55:
-        checks.append(("قدرت سیگنال", "✅ متوسط", f"اطمینان: {conf:.0f}%", 1))
-        total_score += 1
+        checks.append(("قدرت سیگنال", "✅ متوسط", f"{conf:.0f}%", 1)); total_score += 1
     else:
-        checks.append(("قدرت سیگنال", "⚪ ضعیف", f"اطمینان: {conf:.0f}%", 0))
+        checks.append(("قدرت سیگنال", "⚪ ضعیف", f"{conf:.0f}%", 0))
 
-    pct = (total_score / max_score * 100) if max_score > 0 else 0
+    pct = (total_score / max_score * 100) if max_score else 0
     if pct >= 75:
         overall, color = "شرایط کلی مساعد", "success"
     elif pct >= 50:
@@ -348,52 +337,93 @@ def run_daily_checklist(live, intel):
         overall, color = "شرایط نامساعد یا پرریسک", "warning"
 
     return {
-        "checks": checks,
-        "total_score": total_score,
-        "max_score": max_score,
-        "pct": pct,
-        "overall": overall,
-        "color": color
+        "checks": checks, "total_score": total_score, "max_score": max_score,
+        "pct": pct, "overall": overall, "color": color
     }
 
 
-# ====================== ارسال به بله ======================
-def send_to_bale(signal, confidence, regime, usd_price, gold_price, premium, z_prem):
+def build_market_report(live, intel):
+    """گزارش وضعیت بازار (نه سیگنال معاملاتی)"""
+    j_date, j_time = to_jalali()
+    usd = live.get("usd") or {}
+    gold = live.get("gold18") or {}
+    ounce = live.get("ounce") or {}
+    silver = live.get("silver") or {}
+    copper = live.get("copper") or {}
+
+    usd_p = usd.get("price") or 0
+    g18 = gold.get("price") or 0
+    xau = ounce.get("price")
+    xag = silver.get("price")
+    hg = copper.get("price")
+
+    silver_toman_g = (xag * usd_p / 31.1035) if (xag and usd_p) else None
+    copper_toman_kg = (hg * usd_p / 0.453592) if (hg and usd_p) else None
+
+    p_up = intel.get("p_up", 50)
+    p_down = intel.get("p_down", 50)
+
+    factors_txt = ""
+    if intel.get("factors"):
+        for name, sc, desc in intel["factors"][:4]:
+            arrow = "▲" if sc > 0 else ("▼" if sc < 0 else "•")
+            factors_txt += f"\n{arrow} {name}: {desc}"
+    else:
+        factors_txt = "\n• عامل قوی خاصی در داده‌های فعلی دیده نشد."
+
+    note = "بازار در تعادل نسبی است؛ بهتر است تا تثبیت جهت صبر شود."
+    if intel.get("z_prem") is not None:
+        if intel["z_prem"] <= -1.5:
+            note = "پریمیوم منفی قابل توجه: فاصله قیمت داخلی از ارزش جهانی فرصت نسبی ایجاد کرده است."
+        elif intel["z_prem"] >= 1.5:
+            note = "پریمیوم بالا: طلای داخلی نسبت به انس گران‌تر است؛ حساسیت به اصلاح بیشتر است."
+    if intel.get("vol") and intel["vol"] > 2.6:
+        note = "نوسان بالاست؛ مدیریت حجم و حد ضرر اهمیت بیشتری دارد."
+
+    lines = [
+        "📊 گزارش وضعیت بازار فلزات",
+        f"📅 {j_date}  |  🕐 {j_time}",
+        "",
+        "━━━━━━━━━━━━━━",
+        "قیمت‌های لحظه‌ای (تقریبی به تومان)",
+        f"🥇 طلای ۱۸ عیار: {g18:,.0f}" if g18 else "🥇 طلای ۱۸ عیار: —",
+        f"💵 دلار آزاد: {usd_p:,.0f}" if usd_p else "💵 دلار آزاد: —",
+        f"🌍 انس طلا: {xau:,.1f} $" if xau else "🌍 انس طلا: —",
+        f"🥈 نقره (هر گرم): {silver_toman_g:,.0f}" if silver_toman_g else "🥈 نقره: —",
+        f"🟤 مس (هر کیلو): {copper_toman_kg:,.0f}" if copper_toman_kg else "🟤 مس: —",
+        "",
+        "━━━━━━━━━━━━━━",
+        f"رژیم بازار: {intel.get('regime', '—')}",
+        f"احتمال رشد قیمت: {p_up:.0f}٪",
+        f"احتمال نزول قیمت: {p_down:.0f}٪",
+        "",
+        "عوامل دخیل:",
+        factors_txt.strip(),
+        "",
+        "━━━━━━━━━━━━━━",
+        f"💡 نکته فرصت: {note}",
+        "",
+        "#بازار_طلا #گزارش"
+    ]
+    return "\n".join(lines)
+
+
+def send_bale_message(text):
     try:
         bot_token = st.secrets["BALE_BOT_TOKEN"]
         chat_id = st.secrets["BALE_CHAT_ID"]
     except Exception:
         return False
-
-    prem_text = f"{premium:+.1f}%" if premium is not None else "—"
-    z_text = f"{z_prem:.2f}" if z_prem is not None else "—"
-
-    message = f"""🥇 سیگنال طلای ۱۸ عیار
-زمان: {datetime.now().strftime('%H:%M')}
-
-سیگنال: {signal}
-اطمینان: {confidence:.0f}٪
-رژیم: {regime}
-
-دلار: {usd_price:,.0f}
-طلا: {gold_price:,.0f}
-پریمیوم: {prem_text}
-Z-Score: {z_text}
-
-#طلا #سیگنال"""
-
     url = f"https://tapi.bale.ai/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
-
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=12)
         return r.status_code == 200
     except Exception as e:
-        st.warning(f"خطا در ارسال به بله: {e}")
+        st.warning(f"خطا در ارسال بله: {e}")
         return False
 
 
-# ====================== اجرای اصلی ======================
+# ====================== اجرا ======================
 live = fetch_live()
 history = fetch_history()
 
@@ -404,32 +434,11 @@ if not live.get("gold18"):
 intel = intelligence_engine(live, history)
 checklist = run_daily_checklist(live, intel)
 
-# ---------- ارسال سیگنال فقط وقتی تغییر کرده باشد ----------
-if "last_signal" not in st.session_state:
-    st.session_state.last_signal = None
-
-current_signal = intel["signal"]
-
-if current_signal != st.session_state.last_signal:
-    if "خرید" in current_signal or "فروش" in current_signal:
-        success = send_to_bale(
-            signal=intel["signal"],
-            confidence=intel["confidence"],
-            regime=intel["regime"],
-            usd_price=live["usd"]["price"] if live.get("usd") else 0,
-            gold_price=live["gold18"]["price"],
-            premium=intel["prem"],
-            z_prem=intel["z_prem"]
-        )
-        if success:
-            st.toast("سیگنال به بله ارسال شد", icon="✅")
-    st.session_state.last_signal = current_signal
-
-# ====================== رابط کاربری ======================
+# ====================== UI ======================
 st.markdown("""
 <div style="text-align:center;margin-bottom:1rem;">
     <div style="font-size:1.55rem;font-weight:700;color:#fbbf24;">🥇 Gold18K Intelligence</div>
-    <div style="color:#94a3b8;font-size:0.85rem;">موتور تحلیل هوشمند طلای ۱۸ عیار ایران</div>
+    <div style="color:#94a3b8;font-size:0.85rem;">موتور تحلیل + گزارش وضعیت بازار</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -452,87 +461,73 @@ with c4:
     prem_txt = f"{intel['prem']:+.2f}%" if intel["prem"] is not None else "—"
     card("پریمیوم", prem_txt)
 
-st.caption(f"آخرین بروزرسانی: {live.get('ts')} | رژیم فعلی: **{intel['regime']}** | Z-Score: **{intel['z_prem']:.2f}**" if intel.get("z_prem") is not None else f"آخرین بروزرسانی: {live.get('ts')} | رژیم فعلی: **{intel['regime']}**")
+s1, s2, s3 = st.columns(3)
+usd_p = live.get("usd", {}).get("price") or 0
+if live.get("silver") and live["silver"].get("price") and usd_p:
+    s1.metric("نقره (تومان/گرم)", f"{(live['silver']['price'] * usd_p / 31.1035):,.0f}")
+else:
+    s1.metric("نقره (تومان/گرم)", "—")
+if live.get("copper") and live["copper"].get("price") and usd_p:
+    s2.metric("مس (تومان/کیلو)", f"{(live['copper']['price'] * usd_p / 0.453592):,.0f}")
+else:
+    s2.metric("مس (تومان/کیلو)", "—")
+s3.metric("احتمال رشد / نزول", f"{intel.get('p_up', 50):.0f}% / {intel.get('p_down', 50):.0f}%")
 
-t1, t2, t3, t4 = st.tabs(["هوش مصنوعی", "پیش‌بینی و سناریو", "چک‌لیست روزانه", "جزئیات فنی"])
+st.caption(f"آخرین بروزرسانی: {live.get('ts')} | رژیم: **{intel['regime']}**")
+
+# ---------- دکمه ارسال دستی ----------
+st.markdown("---")
+if st.button("📤 ارسال گزارش وضعیت بازار به بله", use_container_width=True, type="primary"):
+    report = build_market_report(live, intel)
+    if send_bale_message(report):
+        st.success("✅ گزارش با موفقیت به کانال بله ارسال شد.")
+    else:
+        st.error("❌ ارسال ناموفق بود. Secrets (توکن و Chat ID) را بررسی کنید.")
+
+# ---------- تب‌ها ----------
+t1, t2, t3, t4 = st.tabs(["هوش مصنوعی", "پیش‌بینی", "چک‌لیست روزانه", "جزئیات"])
 
 with t1:
     sig_class = "buy" if "خرید" in intel["signal"] else "sell" if "فروش" in intel["signal"] else "neutral"
     st.markdown(f'<div class="signal-box {sig_class}">{intel["signal"]}  •  اطمینان {intel["confidence"]:.0f}٪</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section">عوامل مؤثر در سیگنال</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section">عوامل مؤثر</div>', unsafe_allow_html=True)
     if intel["factors"]:
         for name, sc, desc in intel["factors"]:
             color = "#34d399" if sc > 0 else "#f87171" if sc < 0 else "#94a3b8"
             st.markdown(f"- **{name}** <span style='color:{color}'>({sc:+.1f})</span> → {desc}", unsafe_allow_html=True)
     else:
         st.write("عامل قوی خاصی شناسایی نشد.")
-
-    st.markdown('<div class="section">خلاصه هوشمند امروز</div>', unsafe_allow_html=True)
-    summary = f"بازار در رژیم **{intel['regime']}** قرار دارد. "
-    if intel["prem"] is not None:
-        if intel["prem"] < -3:
-            summary += "طلای داخلی نسبت به ارزش جهانی ارزان‌تر است. "
-        elif intel["prem"] > 4:
-            summary += "طلای داخلی گران‌تر از ارزش جهانی معامله می‌شود. "
-    if intel["vol"] and intel["vol"] > 2.5:
-        summary += "نوسان بالاست و باید با حجم کمتر وارد شد."
-    else:
-        summary += "نوسان در محدوده قابل قبول قرار دارد."
-    st.info(summary)
+    st.info(f"رژیم: **{intel['regime']}** | احتمال رشد ≈ {intel.get('p_up', 50):.0f}% | احتمال نزول ≈ {intel.get('p_down', 50):.0f}%")
 
 with t2:
     if intel.get("pred"):
         p = intel["pred"]
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("فعلی", f"{live['gold18']['price']:,.0f}")
-        p2.metric("\~۱ ساعت", f"{p['hour']:,.0f}")
-        p3.metric("فردا (نقطه‌ای)", f"{p['d1']:,.0f}")
-        p4.metric("۳ روز بعد", f"{p['d3']:,.0f}")
-
-        st.caption(f"محدوده محتمل فردا: **{p['d1_low']:,.0f}** تا **{p['d1_high']:,.0f}** تومان")
-        st.caption(f"محدوده محتمل ۳ روزه: **{p['d3_low']:,.0f}** تا **{p['d3_high']:,.0f}** تومان")
-        st.caption(f"بازده مورد انتظار روزانه: {p['expected_daily']:+.2f}%")
+        a, b, c = st.columns(3)
+        a.metric("فعلی", f"{live['gold18']['price']:,.0f}")
+        b.metric("فردا (نقطه‌ای)", f"{p['d1']:,.0f}")
+        c.metric("۳ روز بعد", f"{p['d3']:,.0f}")
+        st.caption(f"محدوده فردا: {p['d1_low']:,.0f} تا {p['d1_high']:,.0f}")
+        st.caption(f"محدوده ۳روزه: {p['d3_low']:,.0f} تا {p['d3_high']:,.0f}")
     else:
         st.warning("داده کافی برای پیش‌بینی نیست.")
 
-    st.markdown('<div class="section">سناریوسازی</div>', unsafe_allow_html=True)
-    sc = st.slider("فرض تغییر دلار آزاد (درصد)", -3.0, 3.0, 0.0, 0.5)
-    res = scenario(live["gold18"]["price"],
-                   live["usd"]["price"] if live.get("usd") else None,
-                   live["ounce"]["price"] if live.get("ounce") else None, sc)
-    if res:
-        st.write(f"اگر دلار **{sc:+.1f}%** تغییر کند:")
-        st.write(f"- دلار جدید تقریبی: **{res['new_usd']:,.0f}** تومان")
-        st.write(f"- قیمت تئوریک جدید: **{res['new_theo']:,.0f}** تومان")
-        st.write(f"- تخمین طلای ۱۸ عیار: **{res['est_gold']:,.0f}** تومان")
-
 with t3:
-    st.markdown('<div class="section">چک‌لیست حرفه‌ای روزانه (خودکار)</div>', unsafe_allow_html=True)
-
     if checklist["color"] == "success":
-        st.success(f"**نتیجه کلی:** {checklist['overall']}  |  امتیاز: {checklist['total_score']}/{checklist['max_score']} ({checklist['pct']:.0f}%)")
+        st.success(f"**{checklist['overall']}** | {checklist['total_score']}/{checklist['max_score']} ({checklist['pct']:.0f}%)")
     elif checklist["color"] == "warning":
-        st.warning(f"**نتیجه کلی:** {checklist['overall']}  |  امتیاز: {checklist['total_score']}/{checklist['max_score']} ({checklist['pct']:.0f}%)")
+        st.warning(f"**{checklist['overall']}** | {checklist['total_score']}/{checklist['max_score']} ({checklist['pct']:.0f}%)")
     else:
-        st.info(f"**نتیجه کلی:** {checklist['overall']}  |  امتیاز: {checklist['total_score']}/{checklist['max_score']} ({checklist['pct']:.0f}%)")
-
-    st.markdown("---")
+        st.info(f"**{checklist['overall']}** | {checklist['total_score']}/{checklist['max_score']} ({checklist['pct']:.0f}%)")
     for name, status, detail, sc in checklist["checks"]:
-        st.markdown(f"**{name}**: {status}  \n{detail}")
+        st.markdown(f"**{name}**: {status} — {detail}")
 
 with t4:
-    col1, col2, col3 = st.columns(3)
-    col1.metric("قیمت تئوریک", f"{intel['theo']:,.0f}" if intel["theo"] else "—")
-    col2.metric("نوسان ۱۰روزه", f"{intel['vol']:.2f}%" if intel["vol"] else "—")
-    col3.metric("همبستگی با دلار", f"{intel['corr']:.2f}" if intel["corr"] is not None else "—")
-
+    c1, c2, c3 = st.columns(3)
+    c1.metric("تئوریک", f"{intel['theo']:,.0f}" if intel["theo"] else "—")
+    c2.metric("نوسان ۱۰روزه", f"{intel['vol']:.2f}%" if intel["vol"] else "—")
+    c3.metric("همبستگی", f"{intel['corr']:.2f}" if intel["corr"] is not None else "—")
     if intel.get("z_prem") is not None:
         st.metric("Z-Score پریمیوم", f"{intel['z_prem']:.2f}")
-    if intel.get("mom5") is not None:
-        st.metric("تغییر ۵ روزه طلا", f"{intel['mom5']:+.2f}%")
-    if intel.get("mom10") is not None:
-        st.metric("تغییر ۱۰ روزه طلا", f"{intel['mom10']:+.2f}%")
 
 if history is not None and len(history) > 8:
     st.markdown('<div class="section">روند قیمت</div>', unsafe_allow_html=True)
@@ -547,4 +542,4 @@ if history is not None and len(history) > 8:
     fig.update_yaxes(showgrid=False)
     st.plotly_chart(fig, use_container_width=True)
 
-st.caption("این سیستم تحلیلی است و توصیه سرمایه‌گذاری محسوب نمی‌شود. اخبار سیاسی می‌تواند همه محاسبات را تغییر دهد.")
+st.caption("گزارش بله فقط با دکمه دستی ارسال می‌شود و توصیه سرمایه‌گذاری نیست.")
