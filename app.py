@@ -13,36 +13,104 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ====================== استایل ======================
+# ====================== استایل (خوانا و بدون محو شدن) ======================
 st.markdown("""
 <style>
 @import url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css');
-html, body, [class*="css"], .stMarkdown, div {
+
+html, body, [class*="css"], .stMarkdown, div, p, span, label {
     font-family: Vazirmatn, Tahoma, sans-serif !important;
 }
-.stApp { background-color: #0b0d12; }
+.stApp { background-color: #0b0d12 !important; }
 .block-container { padding-top: 1rem; max-width: 1080px; }
+
 .card {
-    background: #151821; border: 1px solid #252a36;
-    border-radius: 10px; padding: 0.9rem 0.7rem; text-align: center;
+    background: #1a1d27 !important;
+    border: 1px solid #3a3f50 !important;
+    border-radius: 12px;
+    padding: 1rem 0.75rem;
+    text-align: center;
 }
-.card-label { color: #8b93a7; font-size: 0.78rem; margin-bottom: 0.2rem; }
-.card-value { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; }
-.pos { color: #34d399; } .neg { color: #f87171; }
+.card-label {
+    color: #a8b0c4 !important;
+    font-size: 0.85rem !important;
+    margin-bottom: 0.35rem;
+    font-weight: 500;
+}
+.card-value {
+    font-size: 1.35rem !important;
+    font-weight: 700 !important;
+    color: #ffffff !important;
+}
+.pos { color: #34d399 !important; }
+.neg { color: #f87171 !important; }
+
+[data-testid="stMetricValue"] {
+    color: #ffffff !important;
+    font-size: 1.25rem !important;
+    font-weight: 700 !important;
+}
+[data-testid="stMetricLabel"] {
+    color: #b0b8cc !important;
+    font-size: 0.9rem !important;
+}
+[data-testid="stMetricDelta"] { font-weight: 600 !important; }
+
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: #c5cdd9 !important;
+    font-size: 0.9rem !important;
+}
+
+div.stButton > button {
+    background: linear-gradient(90deg, #c2410c, #ea580c) !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 1.05rem !important;
+    border: none !important;
+    border-radius: 10px !important;
+    padding: 0.7rem 1rem !important;
+    opacity: 1 !important;
+}
+div.stButton > button:hover {
+    background: linear-gradient(90deg, #ea580c, #f97316) !important;
+    color: #ffffff !important;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background: #1a1d27 !important;
+    border-radius: 8px;
+    color: #c5cdd9 !important;
+    padding: 0.45rem 0.95rem;
+    font-weight: 500 !important;
+    opacity: 1 !important;
+}
+.stTabs [aria-selected="true"] {
+    background: #252a38 !important;
+    color: #fbbf24 !important;
+    border: 1px solid #fbbf24 !important;
+    opacity: 1 !important;
+}
+
 .signal-box {
-    border-radius: 10px; padding: 0.9rem; text-align: center;
-    font-size: 1.15rem; font-weight: 700; margin: 0.5rem 0 1rem 0;
+    border-radius: 12px;
+    padding: 1rem;
+    text-align: center;
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin: 0.5rem 0 1rem 0;
+    opacity: 1 !important;
 }
 .buy { background: #064e3b; color: #6ee7b7; border: 1px solid #059669; }
 .sell { background: #7f1d1d; color: #fca5a5; border: 1px solid #dc2626; }
-.neutral { background: #1e293b; color: #cbd5e1; border: 1px solid #475569; }
-.section { font-size: 1.05rem; font-weight: 600; color: #e2e8f0; margin: 1.3rem 0 0.6rem 0; }
-.stTabs [data-baseweb="tab"] {
-    background: #151821; border-radius: 8px; color: #94a3b8; padding: 0.4rem 0.9rem;
+.neutral { background: #1e293b; color: #e2e8f0; border: 1px solid #64748b; }
+
+.section {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #f1f5f9 !important;
+    margin: 1.3rem 0 0.6rem 0;
 }
-.stTabs [aria-selected="true"] {
-    background: #1e293b !important; color: #fbbf24 !important; border: 1px solid #fbbf24;
-}
+.stAlert { opacity: 1 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -343,7 +411,6 @@ def run_daily_checklist(live, intel):
 
 
 def build_market_report(live, intel):
-    """گزارش وضعیت بازار (نه سیگنال معاملاتی)"""
     j_date, j_time = to_jalali()
     usd = live.get("usd") or {}
     gold = live.get("gold18") or {}
@@ -413,13 +480,25 @@ def send_bale_message(text):
         bot_token = st.secrets["BALE_BOT_TOKEN"]
         chat_id = st.secrets["BALE_CHAT_ID"]
     except Exception:
+        st.error("Secrets تنظیم نشده: BALE_BOT_TOKEN و BALE_CHAT_ID")
         return False
+
     url = f"https://tapi.bale.ai/bot{bot_token}/sendMessage"
     try:
-        r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=12)
-        return r.status_code == 200
+        r = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=15)
+        if r.status_code == 200:
+            return True
+        st.error(f"پاسخ بله: {r.status_code} — {r.text[:200]}")
+        return False
+    except requests.exceptions.ConnectTimeout:
+        st.error(
+            "اتصال به سرور بله قطع است (Timeout).\n"
+            "سرور فعلی (مثل Streamlit Cloud) معمولاً به tapi.bale.ai دسترسی ندارد.\n"
+            "راه‌حل: هاست/VPS ایرانی، یا کپی دستی گزارش از بخش پایین."
+        )
+        return False
     except Exception as e:
-        st.warning(f"خطا در ارسال بله: {e}")
+        st.error(f"خطا: {e}")
         return False
 
 
@@ -433,12 +512,13 @@ if not live.get("gold18"):
 
 intel = intelligence_engine(live, history)
 checklist = run_daily_checklist(live, intel)
+report_text = build_market_report(live, intel)
 
 # ====================== UI ======================
 st.markdown("""
 <div style="text-align:center;margin-bottom:1rem;">
     <div style="font-size:1.55rem;font-weight:700;color:#fbbf24;">🥇 Gold18K Intelligence</div>
-    <div style="color:#94a3b8;font-size:0.85rem;">موتور تحلیل + گزارش وضعیت بازار</div>
+    <div style="color:#c5cdd9;font-size:0.9rem;">موتور تحلیل + گزارش وضعیت بازار</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -449,7 +529,11 @@ def card(label, value, chg=None):
     if chg is not None:
         cls = "pos" if chg >= 0 else "neg"
         delta = f'<div class="{cls}" style="font-size:0.8rem;">{chg:+.2f}%</div>'
-    st.markdown(f'<div class="card"><div class="card-label">{label}</div><div class="card-value">{value}</div>{delta}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="card"><div class="card-label">{label}</div>'
+        f'<div class="card-value">{value}</div>{delta}</div>',
+        unsafe_allow_html=True
+    )
 
 with c1:
     card("دلار آزاد", f"{live['usd']['price']:,.0f}" if live.get("usd") else "—", live.get("usd", {}).get("chg"))
@@ -475,21 +559,36 @@ s3.metric("احتمال رشد / نزول", f"{intel.get('p_up', 50):.0f}% / {in
 
 st.caption(f"آخرین بروزرسانی: {live.get('ts')} | رژیم: **{intel['regime']}**")
 
-# ---------- دکمه ارسال دستی ----------
+# ---------- دکمه‌های ارسال / دانلود ----------
 st.markdown("---")
-if st.button("📤 ارسال گزارش وضعیت بازار به بله", use_container_width=True, type="primary"):
-    report = build_market_report(live, intel)
-    if send_bale_message(report):
-        st.success("✅ گزارش با موفقیت به کانال بله ارسال شد.")
-    else:
-        st.error("❌ ارسال ناموفق بود. Secrets (توکن و Chat ID) را بررسی کنید.")
+b1, b2 = st.columns(2)
+
+with b1:
+    if st.button("📤 ارسال گزارش به بله", use_container_width=True, type="primary"):
+        if send_bale_message(report_text):
+            st.success("✅ گزارش با موفقیت به کانال بله ارسال شد.")
+
+with b2:
+    st.download_button(
+        label="💾 دانلود گزارش متنی",
+        data=report_text,
+        file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
+
+with st.expander("📋 مشاهده و کپی متن گزارش (برای ارسال دستی در بله)"):
+    st.code(report_text, language=None)
 
 # ---------- تب‌ها ----------
 t1, t2, t3, t4 = st.tabs(["هوش مصنوعی", "پیش‌بینی", "چک‌لیست روزانه", "جزئیات"])
 
 with t1:
     sig_class = "buy" if "خرید" in intel["signal"] else "sell" if "فروش" in intel["signal"] else "neutral"
-    st.markdown(f'<div class="signal-box {sig_class}">{intel["signal"]}  •  اطمینان {intel["confidence"]:.0f}٪</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="signal-box {sig_class}">{intel["signal"]}  •  اطمینان {intel["confidence"]:.0f}٪</div>',
+        unsafe_allow_html=True
+    )
     st.markdown('<div class="section">عوامل مؤثر</div>', unsafe_allow_html=True)
     if intel["factors"]:
         for name, sc, desc in intel["factors"]:
@@ -536,10 +635,13 @@ if history is not None and len(history) > 8:
                              line=dict(color="#fbbf24", width=2)), secondary_y=False)
     fig.add_trace(go.Scatter(x=history["date"], y=history["usd"], name="دلار",
                              line=dict(color="#60a5fa", width=1.6)), secondary_y=True)
-    fig.update_layout(template="plotly_dark", height=320, margin=dict(l=10, r=10, t=15, b=10),
-                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      legend=dict(orientation="h", y=1.08))
+    fig.update_layout(
+        template="plotly_dark", height=320,
+        margin=dict(l=10, r=10, t=15, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=1.08)
+    )
     fig.update_yaxes(showgrid=False)
     st.plotly_chart(fig, use_container_width=True)
 
-st.caption("گزارش بله فقط با دکمه دستی ارسال می‌شود و توصیه سرمایه‌گذاری نیست.")
+st.caption("گزارش بله فقط با دکمه دستی یا کپی متن ارسال می‌شود و توصیه سرمایه‌گذاری نیست.")
