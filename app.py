@@ -1,7 +1,7 @@
 # ========== Gold18K Pro · app_v3.py ==========
 # 📂 مسیر ریپو: app_v3.py
-# نسخهٔ ۳.۰.۰ — نسخهٔ نمایشی و بدون ارسال: هیچ اتصالی به بله یا هر پیام‌رسان ندارد.
-# موتور: چهار استراتژی معتبر با وزن‌دهی عملکردی، کالیبراسیون تجربی، دروازهٔ هزینه، بک‌تست گام‌به‌گام.
+# نسخهٔ ۳.۱.۰ — نمایشی و بدون ارسال. کالیبراسیون ایمن (بدون قفل شدن روی ۵۰٪)،
+# توضیح شفاف «چرا این تصمیم»، حساسیت به افق، تغییر روزانه از تاریخ، خروجی CSV.
 # وابستگی: streamlit>=1.41, requests, pandas, numpy, plotly, jdatetime
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from urllib3.util.retry import Retry
 # ═══════════════ ۱) پیکربندی ═══════════════
 
 APP = "Gold18K Pro"
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 BUILD = "1405-08-06"
 
 LIVE_API = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/popular.json"
@@ -46,17 +46,23 @@ CFG = {
     "z_win": 60,
     "ew_span": 40,
     "knn_k": 40,
+    "knn_min": 12,
     "shrink": 15,
     "z80": 1.2816,
     "max_conf": 84.0,
     "prem_mean_default": 1.5,
     "prem_sd_default": 2.8,
     "fallback_sigma": 0.012,
+    "min_days_reliable": 60,
+    "min_trades_reliable": 20,
+    "ticks_per_day": 288,   # هدفِ جمع‌آوری برای کندلِ ۵ دقیقه‌ای
 }
 
 STRATS = {"trend": "روند", "break": "شکست کانال", "value": "ارزش نسبی", "fx": "کانال ارزی"}
+ROLE = {"trend": "مومنتوم زمانی", "break": "شکست کانال ۲۰ روزه",
+        "value": "بازگشت نسبت طلا/دلار", "fx": "سرایت نرخ دلار"}
 
-UA = {"User-Agent": "Gold18K-Pro/3.0"}
+UA = {"User-Agent": "Gold18K-Pro/3.1"}
 
 # ═══════════════ ۲) ابزار ═══════════════
 
@@ -98,8 +104,7 @@ def pc(v, d: int = 2) -> str:
 
 
 def scr(msg) -> str:
-    s = re.sub(r"https?://[^\s'\"]+", "<آدرس پنهان>", str(msg))
-    return s[:240]
+    return re.sub(r"https?://[^\s'\"]+", "<آدرس پنهان>", str(msg))[:240]
 
 
 def age_txt(iso: str | None) -> str:
@@ -158,7 +163,7 @@ def _pick(df, cands):
     return None
 
 
-# ═══════════════ ۳) انبار سبک (فقط نمونهٔ محلی) ═══════════════
+# ═══════════════ ۳) انبار سبک ═══════════════
 
 
 class Store:
@@ -178,12 +183,12 @@ class Store:
     def _resolve(p: str) -> str:
         for cand in (p, "/tmp/gold18k_pro.db", ":memory:"):
             try:
-                if cand != ":memory:":
-                    fp = os.path.abspath(cand)
-                    os.makedirs(os.path.dirname(fp) or ".", exist_ok=True)
-                    sqlite3.connect(fp).close()
-                    return fp
-                return cand
+                if cand == ":memory:":
+                    return cand
+                fp = os.path.abspath(cand)
+                os.makedirs(os.path.dirname(fp) or ".", exist_ok=True)
+                sqlite3.connect(fp).close()
+                return fp
             except Exception:
                 continue
         return ":memory:"
@@ -302,7 +307,7 @@ def fetch_live() -> dict:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_history(days: int = 240):
+def fetch_history(days: int = 400):
     def load(url):
         r = _session().get(url, timeout=(6, 15))
         r.raise_for_status()
@@ -334,11 +339,21 @@ def fetch_history(days: int = 240):
         return None
 
 
-# ═══════════════ ۵) موتور استراتژی‌ها ═══════════════
+def hist_change(history, col: str):
+    """تغییر روزانه از خودِ تاریخ — جانشین وقتی نمونهٔ محلی کافی نیست."""
+    try:
+        if history is None or len(history) < 2:
+            return None
+        a, b = float(history[col].iloc[-1]), float(history[col].iloc[-2])
+        return (a / b - 1) * 100 if b > 0 else None
+    except Exception:
+        return None
+
+
+# ═══════════════ ۵) موتور ═══════════════
 
 
 def rz(s: pd.Series, win: int = 60) -> pd.Series:
-    """z مقاوم با میانه/MAD روی پنجرهٔ گذشته؛ خودِ مقدار جاری در پایه حساب نمی‌شود."""
     base = s.shift(1)
     med = base.rolling(win, min_periods=20).median()
     mad = (base - med).abs().rolling(win, min_periods=20).median()
@@ -356,6 +371,7 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
     d["sigma"] = d["ret"].ewm(span=12, adjust=False).std()
     d["slope"] = d["ema20"] / d["ema20"].shift(5) - 1
     d["ratio"] = d["close"] / d["usd"]
+    d["ratio_z"] = rz(d["ratio"], CFG["z_win"])
     d["usd_mom"] = np.log(d["usd"]).diff(5)
     d["usd_ret"] = np.log(d["usd"]).diff()
     d["corr"] = d["ret"].rolling(30, min_periods=15).corr(d["usd_ret"])
@@ -366,7 +382,7 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
     rng = (d["hh"] - d["ll"]).replace(0, np.nan)
     d["s_break"] = ((d["close"] - (d["hh"] + d["ll"]) / 2) / (rng / 2)).clip(-1, 1)
     gate = 1 / (1 + np.exp(1.2 * (rz(d["slope"], CFG["z_win"]).abs() - 1.2)))
-    d["s_value"] = ((-rz(d["ratio"], CFG["z_win"]) / 1.5).clip(-1, 1)) * gate
+    d["s_value"] = ((-d["ratio_z"] / 1.5).clip(-1, 1)) * gate
     d["s_fx"] = (rz(d["usd_mom"], CFG["z_win"]) / 2).clip(-1, 1) * d["corr"].fillna(0).clip(0, 1)
 
     H = CFG["horizon_days"]
@@ -375,7 +391,6 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
     def skill(col: str) -> pd.Series:
         s = d[col]
         contrib = (np.sign(s) * d["fwd"]).where(s.abs() >= 0.30)
-        # نتیجهٔ هر سیگنال فقط H روز بعد معلوم می‌شود؛ پس وزن‌ها H+1 روز عقب‌اند (ضدِ نگاه به آینده)
         return contrib.ewm(span=CFG["ew_span"], min_periods=10).mean().shift(H + 1)
 
     sk = pd.DataFrame({k: skill(f"s_{k}") for k in STRATS})
@@ -388,33 +403,44 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-def walk_probability(d: pd.DataFrame) -> pd.Series:
-    """کالیبراسیون تجربی: احتمال صعود از نزدیک‌ترین نمونه‌های گذشته، با شرینک اندازهٔ نمونه."""
+def _fallback_prob(comp: np.ndarray) -> np.ndarray:
+    """مدل پشتیبان: امتیاز ترکیبی → احتمال. تا وقتی کالیبراسیون تجربی بالغ نشده، موتور قفل نمی‌شود."""
+    return 1.0 / (1.0 + np.exp(-1.1 * (comp / 0.6)))
+
+
+def walk_probability(d: pd.DataFrame):
+    """کالیبراسیون تجربی (k نزدیک‌ترین همسایه) با شرینک؛ ترکیب با مدل پشتیبان."""
     H = CFG["horizon_days"]
-    comp = d["composite"].fillna(0.0).values
+    comp = np.nan_to_num(d["composite"].values, nan=0.0)
     fwd = d["fwd"].values
     n = len(comp)
-    p = np.full(n, 0.5)
+    fb = _fallback_prob(comp)
+    p = fb.copy()
+    used = np.zeros(n, dtype=bool)
+
     for i in range(n):
-        upto = max(0, i - H)  # فقط نمونه‌هایی که نتیجه‌شان تا امروز معلوم شده
+        upto = max(0, i - H)
         idx = np.where(~np.isnan(fwd[:upto]))[0]
-        if len(idx) < 20:
+        if len(idx) < CFG["knn_min"]:
             continue
-        nn = idx[np.argsort(np.abs(comp[idx] - comp[i]))[: CFG["knn_k"]]]
+        k = int(min(CFG["knn_k"], max(10, len(idx) // 6)))
+        nn = idx[np.argsort(np.abs(comp[idx] - comp[i]))[:k]]
         up = float((fwd[nn] > 0).mean())
         m = len(nn)
-        p[i] = (m / (m + CFG["shrink"])) * up + (CFG["shrink"] / (m + CFG["shrink"])) * 0.5
-    return pd.Series(np.clip(p, 0.15, 0.85), index=d.index)
+        knn = (m / (m + CFG["shrink"])) * up + (CFG["shrink"] / (m + CFG["shrink"])) * 0.5
+        p[i] = 0.75 * knn + 0.25 * fb[i]
+        used[i] = True
+
+    return pd.Series(np.clip(p, 0.12, 0.88), index=d.index), float(used.mean())
 
 
-def run_backtest(d: pd.DataFrame, p: pd.Series) -> dict:
-    H = CFG["horizon_days"]
+def run_backtest(d: pd.DataFrame, p: pd.Series, horizon: int | None = None) -> dict:
+    H = int(horizon or CFG["horizon_days"])
     thr = CFG["cost_pct"] * CFG["cost_mult"]
     sigma_pct = (d["sigma"].fillna(CFG["fallback_sigma"]) * 100).values
-    comp = d["composite"].fillna(0.0).values
+    comp = np.nan_to_num(d["composite"].values, nan=0.0)
     pv = p.values
     edge = (2 * pv - 1) * 0.8 * sigma_pct * math.sqrt(H)
-
     pos = np.where((edge >= thr) & (comp > 0), 1, np.where((edge <= -thr) & (comp < 0), -1, 0))
     close = d["close"].values.astype(float)
 
@@ -429,20 +455,24 @@ def run_backtest(d: pd.DataFrame, p: pd.Series) -> dict:
             i += 1
 
     tdf = pd.DataFrame(trades)
+    empty = {"n": 0, "win": None, "pf": None, "exp": None, "total": None, "dd": None,
+             "sharpe": None, "trades": tdf, "equity": pd.Series(dtype=float),
+             "pos": pos, "reliable": False, "exposure": float((pos != 0).mean() * 100), "horizon": H}
     if tdf.empty:
-        return {"n": 0, "win": None, "pf": None, "exp": None, "total": None, "dd": None,
-                "sharpe": None, "trades": tdf, "equity": pd.Series(dtype=float), "pos": pos}
+        return empty
 
     eq = (1 + tdf["ret"] / 100).cumprod()
-    peak = eq.cummax()
-    dd = float(((eq / peak) - 1).min() * 100)
+    dd = float(((eq / eq.cummax()) - 1).min() * 100)
     wins, losses = tdf[tdf["ret"] > 0]["ret"], tdf[tdf["ret"] <= 0]["ret"]
     pf = float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() != 0 else None
-    sharpe = float(tdf["ret"].mean() / tdf["ret"].std() * math.sqrt(252 / H)) if len(tdf) > 2 and tdf["ret"].std() > 0 else None
+    sharpe = (float(tdf["ret"].mean() / tdf["ret"].std() * math.sqrt(252 / H))
+              if len(tdf) > 2 and tdf["ret"].std() > 0 else None)
     return {
-        "n": len(tdf), "win": float((tdf["ret"] > 0).mean() * 100),
-        "pf": pf, "exp": float(tdf["ret"].mean()), "total": float(eq.iloc[-1] - 1) * 100,
-        "dd": dd, "sharpe": sharpe, "trades": tdf, "equity": eq, "pos": pos,
+        "n": len(tdf), "win": float((tdf["ret"] > 0).mean() * 100), "pf": pf,
+        "exp": float(tdf["ret"].mean()), "total": float(eq.iloc[-1] - 1) * 100, "dd": dd,
+        "sharpe": sharpe, "trades": tdf, "equity": eq, "pos": pos,
+        "reliable": len(tdf) >= CFG["min_trades_reliable"],
+        "exposure": float((pos != 0).mean() * 100), "horizon": H,
     }
 
 
@@ -469,7 +499,8 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
         res["prem_z"] = (prem - CFG["prem_mean_default"]) / CFG["prem_sd_default"]
 
     if history is None or len(history) < 40 or not price:
-        res["reason"] = "تاریخ روزانهٔ کافی در دسترس نیست" if history is None or len(history) < 40 else "قیمت زنده نیست"
+        res["reason"] = ("تاریخ روزانهٔ کافی در دسترس نیست" if history is None or len(history) < 40
+                         else "قیمت زنده در دسترس نیست")
         return res
 
     d = build_panel(history)
@@ -478,9 +509,9 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
         res["reason"] = "پنجرهٔ معتبر کوتاه است"
         return res
 
-    p = walk_probability(d)
-    bt = run_backtest(d, p)
+    p, calib_share = walk_probability(d)
     d["p"] = p
+    bt = run_backtest(d, p)
 
     last = d.iloc[-1]
     sigma_d = float(last["sigma"]) if not math.isnan(last["sigma"]) else CFG["fallback_sigma"]
@@ -513,21 +544,36 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
         regime = "رنج"
 
     res.update(
-        ok=True, panel=d, backtest=bt, p_now=p_now, p_req=p_req, comp=comp,
+        ok=True, panel=d, backtest=bt, p_now=p_now, p_req=p_req, gap=(p_req - p_now), comp=comp,
         decision=decision, edge=edge, threshold=thr, sigma_d=sigma_d,
-        conf=conf, agree=agree, sides=sides, regime=regime,
+        conf=conf, agree=agree, sides=sides, regime=regime, calib_share=calib_share,
+        calib_on=calib_share >= 0.5,
         weights={k: float(last[f"w_{k}"]) for k in STRATS},
         skills={k: (None if pd.isna(last[f"k_{k}"]) else float(last[f"k_{k}"])) for k in STRATS},
         ema20=float(last["ema20"]), ema60=float(last["ema60"]),
-        ma20=float(last["ma20"]) if not pd.isna(last["ma20"]) else None,
-        sd20=float(last["sd20"]) if not pd.isna(last["sd20"]) else None,
-        hh=float(last["hh"]) if not pd.isna(last["hh"]) else None,
-        ll=float(last["ll"]) if not pd.isna(last["ll"]) else None,
-        ratio_z=float(rz(d["ratio"]).iloc[-1]) if not pd.isna(rz(d["ratio"]).iloc[-1]) else None,
-        corr=float(last["corr"]) if not pd.isna(last["corr"]) else None,
+        ma20=None if pd.isna(last["ma20"]) else float(last["ma20"]),
+        sd20=None if pd.isna(last["sd20"]) else float(last["sd20"]),
+        hh=None if pd.isna(last["hh"]) else float(last["hh"]),
+        ll=None if pd.isna(last["ll"]) else float(last["ll"]),
+        ratio_z=None if pd.isna(last["ratio_z"]) else float(last["ratio_z"]),
+        corr=None if pd.isna(last["corr"]) else float(last["corr"]),
         n_days=len(d),
     )
     return res
+
+
+def horizon_table(r: dict) -> pd.DataFrame:
+    """حساسیت تصمیم به افق، با همان احتمال — برای اینکه ببینی چرا ۳ روزه انتخاب شده."""
+    rows = []
+    for h in (1, 2, 3, 5, 10):
+        edge = (2 * r["p_now"] - 1) * 0.8 * r["sigma_d"] * 100 * math.sqrt(h)
+        denom = 0.8 * r["sigma_d"] * 100 * math.sqrt(h)
+        need = min(0.95, 0.5 + (r["threshold"] / denom) / 2) if denom > 0 else 0.5
+        dec = ("خرید" if edge >= r["threshold"] and r["comp"] > 0
+               else "فروش" if edge <= -r["threshold"] and r["comp"] < 0 else "نظاره")
+        rows.append({"افق (روز)": h, "لبه (٪)": round(edge, 2), "احتمال لازم (٪)": round(need * 100),
+                     "تصمیم": dec})
+    return pd.DataFrame(rows)
 
 
 def forecast(price: float, sigma_d: float, comp: float) -> dict:
@@ -556,10 +602,8 @@ def risk_plan(price: float, sigma_d: float, decision: str, capital: float, risk_
         "side": side,
         "stop": price * (1 - side * stop_pct),
         "target": price * (1 + side * CFG["target_sigma"] * sigma_d),
-        "stop_pct": stop_pct * 100,
-        "target_pct": CFG["target_sigma"] * sigma_d * 100,
-        "pos_pct": pos_pct,
-        "amount": capital * pos_pct / 100,
+        "stop_pct": stop_pct * 100, "target_pct": CFG["target_sigma"] * sigma_d * 100,
+        "pos_pct": pos_pct, "amount": capital * pos_pct / 100,
     }
 
 
@@ -569,23 +613,19 @@ def risk_plan(price: float, sigma_d: float, decision: str, capital: float, risk_
 def signal_text(r: dict, fc: dict, plan: dict) -> str:
     jd, jt = jalali()
     L = [
-        "سیگنال طلای ۱۸ عیار",
-        f"{jd} — {jt}",
-        "",
+        "سیگنال طلای ۱۸ عیار", f"{jd} — {jt}", "",
         f"تصمیم: {r['decision']}",
-        f"احتمال رشد: {r['p_now'] * 100:.1f}٪",
+        f"احتمال رشد: {r['p_now'] * 100:.1f}٪" + ("" if r["calib_on"] else " (کالیبراسیون در حال بلوغ)"),
         f"امتیاز ترکیبی: {r['comp']:+.2f}",
         f"اطمینان: {r['conf']:.0f}٪ — رژیم: {r['regime']}",
         "",
-        f"قیمت: {fmt(r['price'])} تومان",
-        f"دلار: {fmt(r['usd'])} تومان",
+        f"قیمت: {fmt(r['price'])} تومان", f"دلار: {fmt(r['usd'])} تومان",
         f"انس: {fmt(r['ounce'], 1)} دلار",
         f"پریمیوم: {pc(r['prem'])}" + (" (تخمینی)" if r.get("prem_est") else ""),
         "",
         f"لبهٔ {CFG['horizon_days']}روزه: {r['edge']:+.2f}٪ | آستانهٔ هزینه: {r['threshold']:.2f}٪",
         f"برای ورود لازم است احتمال ≥ {r['p_req'] * 100:.0f}٪",
-        "",
-        "پیش‌بینی (بازهٔ ۸۰٪):",
+        "", "پیش‌بینی (بازهٔ ۸۰٪):",
     ]
     for label, q in fc.items():
         L.append(f"• {label}: {fmt(q['lo'])} تا {fmt(q['hi'])} (میانه {fmt(q['med'])})")
@@ -603,33 +643,27 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict) -> str:
     jd, jt = jalali()
     bt = r["backtest"]
     L = [
-        "گزارش تحلیلی طلای ۱۸ عیار",
-        f"{jd} — {jt}",
-        "──────────────",
-        "بازار",
+        "گزارش تحلیلی طلای ۱۸ عیار", f"{jd} — {jt}", "──────────────", "بازار",
         f"طلای ۱۸ عیار: {fmt(r['price'])} تومان/گرم",
         f"دلار آزاد: {fmt(r['usd'])} تومان",
         f"انس جهانی: {fmt(r['ounce'], 1)} دلار",
         f"ارزش ذاتی (۰.۷۵ عیار): {fmt(r['theo'])} تومان/گرم",
         f"پریمیوم: {pc(r['prem'])}" + (f" | z={r['prem_z']:+.2f}" if r.get("prem_z") is not None else ""),
-        "──────────────",
-        "تصمیم",
+        "──────────────", "تصمیم",
         f"سیگنال: {r['decision']}",
-        f"احتمال کالیبره: {r['p_now'] * 100:.1f}٪ (آستانهٔ لازم {r['p_req'] * 100:.0f}٪)",
-        f"لبهٔ تخمینی: {r['edge']:+.2f}٪ | هزینهٔ رفت‌وبرگشت: {CFG['cost_pct']:.2f}٪ | آستانه: {r['threshold']:.2f}٪",
-        f"رژیم: {r['regime']} | توافق استراتژی‌ها: {r['agree']} از ۴",
-        "──────────────",
-        "لایه‌های استراتژی",
+        f"احتمال: {r['p_now'] * 100:.1f}٪ (آستانهٔ لازم {r['p_req'] * 100:.0f}٪)",
+        f"لبهٔ تخمینی: {r['edge']:+.2f}٪ | هزینه: {CFG['cost_pct']:.2f}٪ | آستانه: {r['threshold']:.2f}٪",
+        f"رژیم: {r['regime']} | توافق: {r['agree']} از ۴",
+        f"وضعیت کالیبراسیون: {'فعال' if r['calib_on'] else 'در حال بلوغ — احتمال از مدل پشتیبان'}",
+        "──────────────", "لایه‌های استراتژی",
     ]
     for k, name in STRATS.items():
         sk = r["skills"].get(k)
-        L.append(
-            f"{name}: امتیاز {r['sides'][k]:+.2f} | وزن {r['weights'][k] * 100:.0f}٪"
-            + (f" | مهارت اخیر {sk:+.2f}٪" if sk is not None else "")
-        )
+        L.append(f"{name}: امتیاز {r['sides'][k]:+.2f} | وزن {r['weights'][k] * 100:.0f}٪"
+                 + (f" | مهارت اخیر {sk:+.2f}٪" if sk is not None else ""))
     L += ["──────────────", "پیش‌بینی"]
     for label, q in fc.items():
-        L.append(f"{label}: {fmt(q['lo'])} — {fmt(q['med'])} — {fmt(q['hi'])} | نوسان دوره {q['sig']:.2f}٪")
+        L.append(f"{label}: {fmt(q['lo'])} — {fmt(q['med'])} — {fmt(q['hi'])} | نوسان {q['sig']:.2f}٪")
     L += ["──────────────", "برنامهٔ ریسک"]
     if plan["side"] != 0:
         L += [f"حد ضرر {fmt(plan['stop'])} ({plan['stop_pct']:.1f}٪) · هدف {fmt(plan['target'])} ({plan['target_pct']:.1f}٪)",
@@ -638,11 +672,11 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict) -> str:
         L.append("بدون ورود؛ حجم صفر.")
     L += ["──────────────", "کارنامهٔ بک‌تست (گام‌به‌گام، با هزینه)"]
     if bt["n"]:
-        L += [f"تعداد معامله: {bt['n']}",
+        L += [f"تعداد معامله: {bt['n']}" + ("" if bt["reliable"] else " (نمونهٔ کم)"),
               f"نرخ برد: {bt['win']:.1f}٪",
               f"میانگین بازده هر معامله: {bt['exp']:+.2f}٪",
               f"سود انباشته: {bt['total']:+.1f}٪ | حداکثر افت: {bt['dd']:.1f}٪",
-              f"Profit Factor: {bt['pf']:.2f}" if bt["pf"] else "Profit Factor: —"]
+              f"Profit Factor: {bt['pf']:.2f}" if bt["pf"] else "Profit Factor: نامشخص"]
     else:
         L.append("معامله‌ای در پنجرهٔ آزمون ثبت نشد.")
     L += ["──────────────",
@@ -710,7 +744,13 @@ html, body, [class*="css"], .stMarkdown, div, p, span, label, input, button, td,
 .row{ display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px dashed var(--line); font-size:.85rem; }
 .row:last-child{ border-bottom:none; }
 .k{ color:var(--muted); } .v{ color:var(--ink); font-weight:600; }
-.tag{ font-size:.7rem; padding:2px 8px; border-radius:6px; background:#f2f4f8; color:#475467; font-weight:600; }
+.why{ display:flex; gap:9px; align-items:flex-start; padding:9px 0; border-bottom:1px dashed var(--line); font-size:.84rem; }
+.why:last-child{ border-bottom:none; }
+.why-t{ color:var(--ink); font-weight:600; }
+.why-d{ color:var(--muted); font-size:.78rem; margin-top:2px; }
+.notice{ background:#fffbeb; border:1px solid #f3ddb4; color:#7c4a03; border-radius:12px;
+  padding:10px 14px; font-size:.8rem; line-height:1.9; margin-bottom:10px; }
+.notice-b{ font-weight:700; }
 
 [data-testid="stMetricValue"]{ color:var(--ink) !important; font-size:1.15rem !important; font-weight:700; }
 [data-testid="stMetricLabel"]{ color:var(--muted) !important; font-size:.78rem; }
@@ -722,11 +762,7 @@ div.stButton > button[kind="primary"]{ background:linear-gradient(100deg,#b45309
 div[data-testid="stDownloadButton"] > button{ border-radius:10px; border:1px solid var(--line);
   background:#fff; color:var(--ink); font-weight:600; padding:8px 14px; min-height:42px; }
 div[data-testid="stDownloadButton"] > button:hover{ border-color:var(--gold2); color:var(--gold); }
-[data-baseweb="tab-list"]{ gap:6px; }
-[data-baseweb="tab"]{ border-radius:9px !important; padding:6px 14px !important; }
-.stExpander, [data-testid="stExpander"]{ border:1px solid var(--line); border-radius:12px; background:#fff; }
 code, pre{ direction: ltr; text-align: left; }
-.stCode, pre{ border-radius:10px !important; }
 hr{ border-color:var(--line); }
 </style>
 """
@@ -738,30 +774,36 @@ def icon(name: str, color: str = "#b45309") -> str:
         "gold": '<rect x="4" y="8" width="7" height="5" rx="1"/><rect x="13" y="8" width="7" height="5" rx="1"/><rect x="8.5" y="15" width="7" height="5" rx="1"/>',
         "globe": '<circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.4 2.5 12.6 0 16M12 4c-2.5 2.4-2.5 12.6 0 16"/>',
         "scale": '<path d="M12 4v16M6 8h12M6 8l-3 6h6L6 8zm12 0l-3 6h6l-3-6z"/>',
-        "chart": '<path d="M4 19V6M4 19h16M8 15l3-4 3 2 4-6"/>',
-        "bolt": '<path d="M13 3L5 14h5l-1 7 8-11h-5l1-7z"/>',
-        "shield": '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/>',
+        "check": '<path d="M5 13l4 4L19 7"/>',
+        "x": '<path d="M6 6l12 12M18 6L6 18"/>',
+        "dash": '<path d="M6 12h12"/>',
         "clock": '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+        "shield": '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/>',
     }.get(name, "")
-    return (
-        f'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{color}" '
-        f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{p}</svg>'
-    )
+    return (f'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{color}" '
+            f'stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">{p}</svg>')
 
 
 def kpi(label, value, sub=None, cls="", ic="gold"):
     s = f'<div class="kpi-s {cls}">{sub}</div>' if sub else ""
     st.markdown(
         f'<div class="kpi"><div class="kpi-h">{icon(ic)}<span>{label}</span></div>'
-        f'<div class="kpi-v num">{value}</div>{s}</div>',
-        unsafe_allow_html=True,
-    )
+        f'<div class="kpi-v num">{value}</div>{s}</div>', unsafe_allow_html=True)
 
 
 def rows(items):
-    body = "".join(
-        f'<div class="row"><span class="k">{k}</span><span class="v num">{v}</span></div>' for k, v in items
-    )
+    body = "".join(f'<div class="row"><span class="k">{k}</span><span class="v num">{v}</span></div>'
+                   for k, v in items)
+    return f'<div class="card">{body}</div>'
+
+
+def why_block(items):
+    body = ""
+    for ok, title, desc in items:
+        ic = "check" if ok else "x"
+        col = "#0e9f6e" if ok else "#dc2626"
+        body += (f'<div class="why">{icon(ic, col)}<div><div class="why-t">{title}</div>'
+                 f'<div class="why-d">{desc}</div></div></div>')
     return f'<div class="card">{body}</div>'
 
 
@@ -777,10 +819,14 @@ def main():
     with st.expander("تنظیمات موتور", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         cost = c1.number_input("هزینهٔ رفت‌وبرگشت (٪)", 0.0, 5.0, CFG["cost_pct"], 0.05,
-                               help="اسپرد + اسلیپیج. برای طلای آب‌شده معمولاً ۰.۴ تا ۰.۸ درصد.")
+                               help="اسپرد + اسلیپیج. برای طلای آب‌شده معمولاً ۰٫۴ تا ۰٫۸ درصد.")
         risk = c2.number_input("ریسک هر معامله (٪)", 0.1, 5.0, CFG["risk_pct"], 0.1)
         capital = c3.number_input("سرمایه (تومان)", 0, 10 ** 13, 200_000_000, 10_000_000)
         horizon = c4.selectbox("افق تصمیم (روز)", [1, 2, 3, 5], index=2)
+        if st.button("بروزرسانی داده و پاک‌سازی کش"):
+            st.cache_data.clear()
+            st.rerun()
+        st.caption("هزینه و افق، هم تصمیم امروز و هم کارنامهٔ بک‌تست را عوض می‌کنند.")
     CFG["cost_pct"], CFG["risk_pct"], CFG["horizon_days"] = float(cost), float(risk), int(horizon)
 
     live = fetch_live()
@@ -791,9 +837,8 @@ def main():
 
     jd, jt = jalali()
     fresh = age_txt(live.get("at"))
-
-    # ── نوار بالا
     ok_live = r.get("price") is not None
+
     st.markdown(
         f"""<div class="topbar">
   <div class="brand">{icon("gold", "#f59e0b")}
@@ -804,9 +849,7 @@ def main():
     <span class="chip {'chip-ok' if ok_live else 'chip-warn'}">{'داده زنده' if ok_live else 'داده ناقص'}</span>
     <span class="chip chip-mut">{jd} · {jt}</span>
     <span class="chip chip-mut">بروزرسانی {fresh}</span>
-  </div></div>""",
-        unsafe_allow_html=True,
-    )
+  </div></div>""", unsafe_allow_html=True)
 
     if not ok_live:
         st.error("قیمت زندهٔ طلای ۱۸ عیار در دسترس نیست. چند لحظه بعد دوباره تلاش کنید.")
@@ -814,33 +857,50 @@ def main():
             st.caption(" · ".join(live["errors"]))
         st.stop()
 
-    # ── کارت‌ها
-    g_chg = store.change("gold18", r["price"])
-    u_chg = store.change("usd", r["usd"])
+    g_local, u_local = store.change("gold18", r["price"]), store.change("usd", r["usd"])
+    g_show = g_local if g_local is not None else hist_change(history, "gold18")
+    u_show = u_local if u_local is not None else hist_change(history, "usd")
+    g_tag = ("محلی" if g_local is not None else "روزانه") if g_show is not None else "در حال جمع‌آوری"
+    u_tag = ("محلی" if u_local is not None else "روزانه") if u_show is not None else "در حال جمع‌آوری"
+
     c = st.columns(4)
     with c[0]:
-        kpi("طلای ۱۸ عیار", fmt(r["price"]), pc(g_chg) if g_chg is not None else "تغییر در دسترس نیست",
-            "up" if (g_chg or 0) >= 0 else "down", "gold")
+        kpi("طلای ۱۸ عیار", fmt(r["price"]),
+            (pc(g_show) + f" · {g_tag}") if g_show is not None else g_tag,
+            "up" if (g_show or 0) >= 0 else "down", "gold")
     with c[1]:
-        kpi("دلار آزاد", fmt(r["usd"]), pc(u_chg) if u_chg is not None else "تغییر در دسترس نیست",
-            "up" if (u_chg or 0) >= 0 else "down", "usd")
+        kpi("دلار آزاد", fmt(r["usd"]),
+            (pc(u_show) + f" · {u_tag}") if u_show is not None else u_tag,
+            "up" if (u_show or 0) >= 0 else "down", "usd")
     with c[2]:
         kpi("انس جهانی", fmt(r["ounce"], 1) + " $", "دلار بر انس", "", "globe")
     with c[3]:
-        kpi("پریمیوم", pc(r["prem"]),
-            ("تخمینی" if r.get("prem_est") else f"z={r['prem_z']:+.2f}") if r.get("prem_z") is not None else None,
-            "up" if (r.get("prem") or 0) >= 0 else "down", "scale")
+        sub = ("تخمینی" if r.get("prem_est") else f"z={r['prem_z']:+.2f}") if r.get("prem_z") is not None else None
+        kpi("پریمیوم", pc(r["prem"]), sub, "up" if (r.get("prem") or 0) >= 0 else "down", "scale")
 
     if not r.get("ok"):
         st.warning(r.get("reason", "موتور نتوانست محاسبه کند."))
         st.stop()
 
+    if not r["calib_on"]:
+        st.markdown(
+            '<div class="notice"><span class="notice-b">کالیبراسیون تجربی هنوز بالغ نشده است.</span> '
+            f'تنها {r["calib_share"] * 100:.0f}٪ از ردیف‌های تاریخی نتیجهٔ معلوم داشتند، پس احتمال از '
+            'مدل پشتیبان (نگاشت امتیاز) می‌آید؛ به همین دلیل احتمال دقیقاً ۵۰٪ دیده نمی‌شود. '
+            'با افزایش تاریخ روزانه، این عدد خودکار به کالیبراسیون تجربی می‌رسد.</div>',
+            unsafe_allow_html=True)
+
     plan = risk_plan(r["price"], r["sigma_d"], r["decision"], capital, risk)
     fc = forecast(r["price"], r["sigma_d"], r["comp"])
 
-    # ── قهرمان تصمیم
     dcls = "dec-buy" if r["decision"] == "خرید" else ("dec-sell" if "فروش" in r["decision"] else "dec-wait")
     pu = r["p_now"] * 100
+    gap_txt = ""
+    if abs(r["edge"]) < r["threshold"]:
+        gap_txt = (f'ورود نیازمند احتمال ≥ <b class="num">{r["p_req"] * 100:.0f}٪</b> است؛ '
+                   f'فاصله <b class="num">{max(0, (r["p_req"] - r["p_now"]) * 100):.1f}</b> واحد.')
+    else:
+        gap_txt = "لبه از آستانهٔ هزینه بیشتر است."
     st.markdown(
         f"""<div class="hero">
   <div class="hero-top">
@@ -864,15 +924,11 @@ def main():
   </div>
   <div style="margin-top:12px;font-size:.8rem;color:var(--muted);line-height:1.9;">
     لبهٔ تخمینی <b class="num">{r['edge']:+.2f}٪</b> در برابر آستانهٔ هزینهٔ
-    <b class="num">{r['threshold']:.2f}٪</b> ·
-    {'لبه کافی است' if abs(r['edge']) >= r['threshold'] else f'ورود نیازمند احتمال ≥ <b class="num">{r["p_req"] * 100:.0f}٪</b> است'}
+    <b class="num">{r['threshold']:.2f}٪</b> · {gap_txt}
   </div>
-</div>""",
-        unsafe_allow_html=True,
-    )
+</div>""", unsafe_allow_html=True)
     st.write("")
 
-    # ── منوی برنامه
     pages = ["نمای کلی", "سیگنال", "پیش‌بینی", "کارنامه", "داده‌ها"]
     try:
         page = st.segmented_control("ناوبری", pages, default=pages[0], label_visibility="collapsed")
@@ -885,26 +941,29 @@ def main():
     if page == "نمای کلی":
         left, right = st.columns([1.35, 1])
         with left:
-            sig_rows = [
-                (f"{STRATS[k]}", f"{r['sides'][k]:+.2f} · وزن {r['weights'][k] * 100:.0f}٪") for k in STRATS
-            ]
-            st.markdown(rows([("امتیاز ترکیبی", f"{r['comp']:+.2f}")] + sig_rows),
-                        unsafe_allow_html=True)
-            st.write("")
-            st.markdown(rows([
-                ("نوسان روزانه (σ)", f"{r['sigma_d'] * 100:.2f}٪"),
-                ("همبستگی دلار", f"{r['corr']:.2f}" if r.get("corr") is not None else "—"),
-                ("z نسبت طلا/دلار", f"{r['ratio_z']:+.2f}" if r.get("ratio_z") is not None else "—"),
-                ("ارزش ذاتی", f"{fmt(r['theo'])} تومان"),
+            st.markdown('<div class="h">چرا این تصمیم؟</div>', unsafe_allow_html=True)
+            st.markdown(why_block([
+                (abs(r["comp"]) >= 0.15, "جهت مشخص است",
+                 f"امتیاز ترکیبی {r['comp']:+.2f}" + ("" if abs(r["comp"]) >= 0.15 else " — زیر آستانهٔ ۰٫۱۵، یعنی بازار بی‌جهت")),
+                (abs(r["edge"]) >= r["threshold"], "لبه از هزینه بیشتر است",
+                 f"لبه {r['edge']:+.2f}٪ در برابر آستانهٔ {r['threshold']:.2f}٪"),
+                (r["agree"] >= 2, "توافق استراتژی‌ها",
+                 f"{r['agree']} از ۴ لایه هم‌جهت‌اند"),
+                (r["calib_on"], "کالیبراسیون بالغ",
+                 f"{r['calib_share'] * 100:.0f}٪ ردیف‌ها نمونهٔ معتبر داشتند"),
             ]), unsafe_allow_html=True)
+            st.write("")
+            st.markdown(rows([("امتیاز ترکیبی", f"{r['comp']:+.2f}")]
+                             + [(STRATS[k], f"{r['sides'][k]:+.2f} · وزن {r['weights'][k] * 100:.0f}٪") for k in STRATS]),
+                        unsafe_allow_html=True)
         with right:
             bt = r["backtest"]
             if bt["n"]:
                 st.markdown(rows([
-                    ("نرخ برد بک‌تست", f"{bt['win']:.1f}٪"),
+                    ("نرخ برد بک‌تست", f"{bt['win']:.1f}٪" if bt["reliable"] else "نمونهٔ کم"),
                     ("تعداد معامله", f"{bt['n']}"),
                     ("میانگین هر معامله", f"{bt['exp']:+.2f}٪"),
-                    ("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "—"),
+                    ("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "نامشخص"),
                 ]), unsafe_allow_html=True)
             else:
                 st.info("بک‌تست قابل اتکا هنوز شکل نگرفته است.")
@@ -926,8 +985,7 @@ def main():
         fig.add_trace(go.Scatter(x=p["day"], y=p["ema20"], name="EMA20", line=dict(color="#0e9f6e", width=1.2)), row=1, col=1)
         fig.add_trace(go.Scatter(x=p["day"], y=p["ema60"], name="EMA60", line=dict(color="#dc2626", width=1.2)), row=1, col=1)
         if p["sd20"].notna().any():
-            up = p["ma20"] + 2 * p["sd20"]
-            lo = p["ma20"] - 2 * p["sd20"]
+            up, lo = p["ma20"] + 2 * p["sd20"], p["ma20"] - 2 * p["sd20"]
             fig.add_trace(go.Scatter(x=p["day"], y=up, line=dict(width=0), showlegend=False, hoverinfo="skip"), row=1, col=1)
             fig.add_trace(go.Scatter(x=p["day"], y=lo, line=dict(width=0), fill="tonexty",
                                      fillcolor="rgba(180,83,9,.07)", name="باند ۲σ", hoverinfo="skip"), row=1, col=1)
@@ -935,8 +993,7 @@ def main():
         fig.add_trace(go.Bar(x=p["day"], y=p["composite"], marker_color=colors, name="امتیاز"), row=2, col=1)
         fig.update_layout(template="plotly_white", height=430, margin=dict(l=8, r=8, t=10, b=8),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                          legend=dict(orientation="h", y=1.08, x=0.02, font=dict(size=10)),
-                          bargap=0.2)
+                          legend=dict(orientation="h", y=1.08, x=0.02, font=dict(size=10)), bargap=0.2)
         fig.update_yaxes(showgrid=True, gridcolor="#eef0f6", tickformat=",", row=1, col=1)
         fig.update_yaxes(showgrid=False, zeroline=True, zerolinecolor="#d0d5e2", row=2, col=1)
         st.plotly_chart(fig, use_container_width=True)
@@ -944,44 +1001,35 @@ def main():
     # ═══ سیگنال
     elif page == "سیگنال":
         st.markdown('<div class="h">لایه‌های استراتژی</div>', unsafe_allow_html=True)
-        st.dataframe(
-            pd.DataFrame([{
-                "استراتژی": STRATS[k],
-                "امتیاز امروز": round(r["sides"][k], 2),
-                "وزن": f"{r['weights'][k] * 100:.0f}٪",
-                "مهارت اخیر": ("—" if r["skills"][k] is None else f"{r['skills'][k]:+.2f}٪"),
-                "نقش": {"trend": "مومنتوم زمانی", "break": "شکست کانال ۲۰ روزه",
-                        "value": "بازگشت نسبت طلا/دلار", "fx": "سرایت نرخ دلار"}[k],
-            } for k in STRATS]),
-            use_container_width=True, hide_index=True,
-        )
-        st.caption(
-            "وزن هر لایه با عملکرد گذشتهٔ خودش (میانگین نمایی، عقب‌افتاده به اندازهٔ افق) تنظیم می‌شود؛ "
-            "لایهٔ بی‌مهارت وزن نزدیک صفر می‌گیرد."
-        )
+        st.dataframe(pd.DataFrame([{
+            "استراتژی": STRATS[k], "امتیاز امروز": round(r["sides"][k], 2),
+            "وزن": f"{r['weights'][k] * 100:.0f}٪",
+            "مهارت اخیر": "—" if r["skills"][k] is None else f"{r['skills'][k]:+.2f}٪",
+            "نقش": ROLE[k],
+        } for k in STRATS]), use_container_width=True, hide_index=True)
+        st.caption("وزن هر لایه از عملکرد گذشتهٔ خودش می‌آید (میانگین نمایی، عقب‌افتاده به اندازهٔ افق)؛ "
+                   "لایهٔ بی‌مهارت وزن نزدیک صفر می‌گیرد.")
 
         st.write("")
-        st.markdown('<div class="h">حساب ارزش انتظاری</div>', unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame([{
-            "احتمال کالیبره": f"{r['p_now'] * 100:.1f}٪",
-            "احتمال لازم": f"{r['p_req'] * 100:.0f}٪",
-            "لبه": f"{r['edge']:+.2f}٪",
-            "آستانهٔ هزینه": f"{r['threshold']:.2f}٪",
-            "نتیجه": "ورود مجاز" if abs(r["edge"]) >= r["threshold"] else "ورود مجاز نیست",
-        }]), use_container_width=True, hide_index=True)
-        st.caption("لبه = (۲p−۱) × ۰.۸σ × √افق. σ از نوسان تحقق‌یافته می‌آید و p با k‑نزدیک‌ترین همسایه کالیبره می‌شود.")
+        st.markdown('<div class="h">ارزش انتظاری و حساسیت به افق</div>', unsafe_allow_html=True)
+        st.dataframe(horizon_table(r), use_container_width=True, hide_index=True)
+        st.caption(f"احتمال فعلی {r['p_now'] * 100:.1f}٪ است و برای افق {CFG['horizon_days']} روزه "
+                   f"آستانهٔ {r['threshold']:.2f}٪ لازم است. ستون تصمیم نشان می‌دهد با همان احتمال، "
+                   "افق‌های دیگر چه می‌گفتند — کمکی برای انتخاب افق، نه توصیهٔ جداگانه.")
 
         st.write("")
         st.markdown('<div class="h">سطوح تصمیم</div>', unsafe_allow_html=True)
+        ma, sd = r["ma20"] or 0, r["sd20"] or 0
         st.markdown(rows([
-            ("EMA20", fmt(r["ema20"])),
-            ("EMA60", fmt(r["ema60"])),
+            ("EMA20 (میانگین سریع)", fmt(r["ema20"])),
+            ("EMA60 (میانگین کند)", fmt(r["ema60"])),
             ("سقف کانال ۲۰ روزه", fmt(r["hh"])),
             ("کف کانال ۲۰ روزه", fmt(r["ll"])),
-            ("+۲σ", fmt((r["ma20"] or 0) + 2 * (r["sd20"] or 0))),
-            ("−۲σ", fmt((r["ma20"] or 0) - 2 * (r["sd20"] or 0))),
+            ("+۲σ", fmt(ma + 2 * sd)),
+            ("−۲σ", fmt(ma - 2 * sd)),
         ]), unsafe_allow_html=True)
-        st.caption("عبور قیمت از هر یک از این سطوح، وزن‌های موتور را جابه‌جا می‌کند و می‌تواند تصمیم را عوض کند.")
+        st.caption("بستن قیمت بالای سقف کانال، لایهٔ شکست را مثبت می‌کند؛ زیر کف، منفی. "
+                   "عبور از EMA20 به سمت EMA60 جهت روند را عوض می‌کند.")
 
         st.write("")
         st.markdown('<div class="h">متن آمادهٔ سیگنال</div>', unsafe_allow_html=True)
@@ -993,35 +1041,25 @@ def main():
     elif page == "پیش‌بینی":
         st.markdown('<div class="h">بازهٔ ۸۰٪ برای هر افق</div>', unsafe_allow_html=True)
         st.dataframe(pd.DataFrame([{
-            "افق": label,
-            "کمینه": fmt(q["lo"]),
-            "میانه": fmt(q["med"]),
-            "بیشینه": fmt(q["hi"]),
-            "حرکت میانه": pc(q["move"]),
-            "نوسان دوره": f"{q['sig']:.2f}٪",
+            "افق": label, "کمینه": fmt(q["lo"]), "میانه": fmt(q["med"]),
+            "بیشینه": fmt(q["hi"]), "حرکت میانه": pc(q["move"]), "نوسان دوره": f"{q['sig']:.2f}٪",
         } for label, q in fc.items()]), use_container_width=True, hide_index=True)
-        st.caption(
-            "مدل، توزیع لگ‌نرمال با نوسان تحقق‌یافته و رانش محافظه‌کارانه است؛ عدد قطعی نمی‌دهد. "
-            "افق ساعتی از σ روزانه بر √۲۴ ساخته می‌شود و تا جمع شدن نمونهٔ درون‌روزی، تقریبی است."
-        )
+        st.caption("توزیع لگ‌نرمال با نوسان تحقق‌یافته و رانش محافظه‌کارانه؛ عدد قطعی نیست. "
+                   "افق ساعتی از σ روزانه بر √۲۴ ساخته می‌شود و تا جمع شدن نمونهٔ درون‌روزی تقریبی است.")
         st.write("")
         p = r["panel"]
         cur = r["price"]
         future = [p["day"].iloc[-1] + pd.Timedelta(days=i) for i in (1, 2, 3)]
-        xs = list(p["day"].iloc[-40:]) + future
         st.markdown('<div class="h">قیف پیش‌بینی ۳ روزه</div>', unsafe_allow_html=True)
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=p["day"].iloc[-40:], y=p["close"].iloc[-40:], name="قیمت",
                                  line=dict(color="#101828", width=2)))
-        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future,
-                                 y=[cur] + [fc["۳ روز"]["med"]] * 3, name="میانه",
-                                 line=dict(color="#f59e0b", width=2, dash="dot")))
-        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future,
-                                 y=[cur] + [fc["۳ روز"]["hi"]] * 3, name="سقف ۸۰٪",
-                                 line=dict(color="#0e9f6e", width=1), fill=None))
-        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future,
-                                 y=[cur] + [fc["۳ روز"]["lo"]] * 3, name="کف ۸۰٪",
-                                 line=dict(color="#dc2626", width=1), fill="tonexty",
+        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future, y=[cur] + [fc["۳ روز"]["med"]] * 3,
+                                 name="میانه", line=dict(color="#f59e0b", width=2, dash="dot")))
+        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future, y=[cur] + [fc["۳ روز"]["hi"]] * 3,
+                                 name="سقف ۸۰٪", line=dict(color="#0e9f6e", width=1)))
+        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future, y=[cur] + [fc["۳ روز"]["lo"]] * 3,
+                                 name="کف ۸۰٪", line=dict(color="#dc2626", width=1), fill="tonexty",
                                  fillcolor="rgba(180,83,9,.10)"))
         fig.update_layout(template="plotly_white", height=340, margin=dict(l=8, r=8, t=10, b=8),
                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -1033,14 +1071,18 @@ def main():
     elif page == "کارنامه":
         bt = r["backtest"]
         if not bt["n"]:
-            st.info("در پنجرهٔ فعلی، شرط ورود (لبه بیش از هزینه) به تعداد کافی فعال نشده؛ کارنامه خالی است.")
+            st.info("در پنجرهٔ فعلی شرط ورود (لبه بیش از هزینه) فعال نشده؛ کارنامه خالی است. "
+                    "این یعنی موتور سکوت کرده، نه اینکه خراب است.")
         else:
             c = st.columns(5)
-            c[0].metric("نرخ برد", f"{bt['win']:.1f}٪")
+            c[0].metric("نرخ برد", f"{bt['win']:.1f}٪" if bt["reliable"] else "نمونهٔ کم")
             c[1].metric("معاملات", f"{bt['n']}")
             c[2].metric("میانگین هر معامله", f"{bt['exp']:+.2f}٪")
-            c[3].metric("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "—")
+            c[3].metric("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "نامشخص")
             c[4].metric("حداکثر افت", f"{bt['dd']:.1f}٪")
+            st.caption(f"نمایش موتور (درصد روزهایی که پوزیشن داشت): {bt['exposure']:.0f}٪ · "
+                       + ("نمونه برای قضاوت کافی است." if bt["reliable"]
+                          else f"کمتر از {CFG['min_trades_reliable']} معامله؛ عدد نرخ برد شکننده است."))
             fig = go.Figure()
             fig.add_trace(go.Scatter(y=bt["equity"] * 100, name="سرمایه", line=dict(color="#0e9f6e", width=2)))
             fig.update_layout(template="plotly_white", height=260, margin=dict(l=8, r=8, t=10, b=8),
@@ -1054,13 +1096,12 @@ def main():
             t["bucket"] = pd.cut(t["p"], bins=[0, .45, .5, .55, .6, 1],
                                  labels=["<۴۵٪", "۴۵–۵۰٪", "۵۰–۵۵٪", "۵۵–۶۰٪", ">۶۰٪"])
             cal = t.groupby("bucket", observed=True).agg(
-                تعداد=("p", "size"), احتمال_میانگین=("p", "mean"), نرخ_برد=("ret", lambda s: (s > 0).mean()))
-            cal["احتمال_میانگین"] = (cal["احتمال_میانگین"] * 100).round(1)
-            cal["نرخ_برد"] = (cal["نرخ_برد"] * 100).round(1)
-            st.dataframe(cal.rename(columns={"احتمال_میانگین": "احتمال میانگین (٪)",
-                                             "نرخ_برد": "نرخ برد واقعی (٪)"}),
+                تعداد=("p", "size"), احتمال=("p", "mean"), برد=("ret", lambda s: (s > 0).mean()))
+            cal["احتمال"] = (cal["احتمال"] * 100).round(1)
+            cal["برد"] = (cal["برد"] * 100).round(1)
+            st.dataframe(cal.rename(columns={"احتمال": "احتمال میانگین (٪)", "برد": "نرخ برد واقعی (٪)"}),
                          use_container_width=True)
-            st.caption("اگر ستون آخر به ستون قبل نزدیک باشد، احتمال‌ها کالیبره‌اند. اختلاف زیاد یعنی نمونه کم است.")
+            st.caption("هر چه ستون آخر به ستون قبل نزدیک‌تر باشد، احتمال‌ها صادق‌ترند. اختلاف زیاد یعنی نمونه کم است.")
 
             st.markdown('<div class="h">معاملات</div>', unsafe_allow_html=True)
             show = bt["trades"].tail(20).iloc[::-1].copy()
@@ -1068,13 +1109,15 @@ def main():
             show["side"] = np.where(show["side"] > 0, "خرید", "فروش")
             show["ret"] = show["ret"].round(2)
             show["p"] = (show["p"] * 100).round(1)
-            st.dataframe(show.rename(columns={"day": "تاریخ", "side": "جهت", "ret": "بازده (٪)", "p": "احتمال (٪)"}),
+            st.dataframe(show.rename(columns={"day": "تاریخ", "side": "جهت",
+                                              "ret": "بازده (٪)", "p": "احتمال (٪)"}),
                          use_container_width=True, hide_index=True)
+            csv = bt["trades"].to_csv(index=False).encode("utf-8-sig")
+            st.download_button("دانلود CSV معاملات", csv,
+                               file_name=f"trades_{datetime.now():%Y%m%d_%H%M}.csv", mime="text/csv")
 
-        st.caption(
-            f"بک‌تست روی {r['n_days']} روز، گام‌به‌گام و بدون نگاه به آینده، با هزینهٔ "
-            f"{CFG['cost_pct']:.2f}٪ در هر معامله. تعداد کم معامله یعنی عدد نرخ برد هنوز شکننده است."
-        )
+        st.caption(f"بک‌تست روی {r['n_days']} روز، گام‌به‌گام و بدون نگاه به آینده، با هزینهٔ "
+                   f"{CFG['cost_pct']:.2f}٪ در هر معامله.")
 
     # ═══ داده‌ها
     else:
@@ -1089,6 +1132,21 @@ def main():
              live.get("copper") is not None),
         ], columns=["قلم", "مقدار", "منبع", "دریافت شد"]), use_container_width=True, hide_index=True)
         st.caption(f"آخرین دریافت {fresh} · تاریخ روزانه {r['n_days']} روز · نمونه‌های محلی {len(ticks)}")
+
+        st.write("")
+        st.markdown('<div class="h">آمادگی داده</div>', unsafe_allow_html=True)
+        days_ok = r["n_days"] >= CFG["min_days_reliable"]
+        tick_goal = CFG["ticks_per_day"]
+        st.markdown(why_block([
+            (days_ok, f"تاریخ روزانه: {r['n_days']} روز",
+             "کافی برای سیگنال روزانه" if days_ok else f"حداقل {CFG['min_days_reliable']} روز لازم است"),
+            (len(ticks) >= 40, f"نمونهٔ محلی: {len(ticks)}",
+             "برای z پریمیوم و تغییر لحظه‌ای استفاده می‌شود"),
+            (len(ticks) >= tick_goal, f"مسیر کندل ۵ دقیقه‌ای: {len(ticks)} از {tick_goal}",
+             "با این تعداد نمونه در یک روز، افق یک‌ساعته واقعی می‌شود"),
+        ]), unsafe_allow_html=True)
+        st.caption("نمونه‌های محلی فقط وقتی اضافه می‌شوند که صفحه باز باشد و داده تازه باشد؛ "
+                   "برای جمع‌آوری پیوسته، اپ باید روی سروری با اجرای مستمر بماند.")
 
         st.write("")
         st.markdown('<div class="h">گزارش کامل</div>', unsafe_allow_html=True)
