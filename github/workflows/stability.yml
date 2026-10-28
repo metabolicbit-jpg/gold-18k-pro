@@ -1,6 +1,7 @@
-// ========== Gold18K Pro · .github/workflows/stability.yml ==========
-// 📂 مسیر ریپو: .github/workflows/stability.yml
-// اجرای دستیِ آزمون پایداری از تب Actions — بدون VPS و بدون ماشین محلی.
+# ========== Gold18K Pro · .github/workflows/stability.yml ==========
+# 📂 مسیر ریپو: .github/workflows/stability.yml
+# اجرای دستیِ آزمون پایداری از تب Actions — بدون VPS و بدون ماشین محلی.
+# توجه: در YAML فقط # کامنت است؛ // کل فایل را نامعتبر می‌کند.
 
 name: stability
 
