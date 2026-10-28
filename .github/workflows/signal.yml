@@ -1,0 +1,66 @@
+# ========== Gold18K Pro · .github/workflows/signal.yml ==========
+# 📂 مسیر ریپو: .github/workflows/signal.yml
+# هر روز یک سیگنال را در data/signals.csv ثبت می‌کند و نتیجهٔ سیگنال‌های گذشته را می‌سنجد.
+# با هر کامیت، گیت‌هاب برایت ایمیل می‌فرستد — همین می‌شود «اعلام».
+
+name: signal
+
+on:
+  schedule:
+    # 06:30 UTC = 10:00 تهران
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: signal
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: نصب وابستگی
+        run: pip install --quiet --disable-pip-version-check requests pandas numpy jdatetime streamlit plotly
+
+      - name: ثبت و ارزیابی
+        shell: bash
+        run: |
+          set -o pipefail
+          python daily_signal.py 2>&1 | tee signal.txt
+          {
+            echo "## سیگنال روز"
+            echo ""
+            echo '```'
+            cat signal.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: کامیت
+        run: |
+          git config user.name "gold18k-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/signals.csv
+          if git diff --quiet --cached; then
+            echo "بدون تغییر"
+          else
+            git commit -m "signal: $(date -u +%F)"
+            git push
+          fi
+
+      - name: بارگذاری خروجی
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-output
+          path: signal.txt
+          if-no-files-found: ignore
