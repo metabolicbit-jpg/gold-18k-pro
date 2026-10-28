@@ -1,0 +1,28 @@
+// ========== Gold18K Pro · .github/workflows/stability.yml ==========
+// 📂 مسیر ریپو: .github/workflows/stability.yml
+// اجرای دستیِ آزمون پایداری از تب Actions — بدون VPS و بدون ماشین محلی.
+
+name: stability
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: نصب وابستگی
+        run: pip install --quiet --disable-pip-version-check requests pandas numpy jdatetime streamlit plotly
+
+      - name: آزمون پایداری
+        run: python stability.py
