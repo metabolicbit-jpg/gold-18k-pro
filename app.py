@@ -128,7 +128,7 @@ HISTORY_GOLD18 = "https://raw.githubusercontent.com/iran-market/iran-market.gith
 METAL_API = "https://api.gold-api.com/price/{}"
 XAU_HISTORY = "https://stooq.com/q/d/l/?s=xauusd&i=d"
 
-FA_DIGITS = str.maketrans("0123456789,%", "۰۱۲۳۴۵۶۷۸۹٪،")
+FA_DIGITS = str.maketrans("0123456789,%", "۰۱۲۳۴۵۶۷۸۹،٪")
 WEEKDAYS_FA = ["دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه"]  # دوشنبه=0
 
 
@@ -475,6 +475,67 @@ def backtest_all(feat):
     return {st_["id"]: backtest_strategy(feat, st_) for st_ in STRATEGIES}
 
 
+def bt_stats_range(feat, strat, i0, i1):
+    """آمار واقعی روی یک بازه: تعداد سیگنال، وین‌ریت، میانگین بازده هر سیگنال،
+    بازده تجمعی سیگنال‌ها و بازده بازار (خرید و نگهداری) در همان بازه."""
+    d = feat
+    sigs = wins = 0
+    total_ret = 0.0
+    bench = 0.0
+    for i in range(i0, i1):
+        s, _ = strat["fn"](d, i)
+        r = d.iloc[i + 1]["ret"]
+        if r is None or pd.isna(r):
+            continue
+        bench += r
+        if abs(s) >= strat["thr"]:
+            pos = 1.0 if s > 0 else -1.0
+            rr = pos * r
+            sigs += 1
+            total_ret += rr
+            if rr > 0:
+                wins += 1
+    return {
+        "n": sigs,
+        "hit": (wins / sigs * 100) if sigs else None,
+        "avg_ret": (total_ret / sigs * 100) if sigs else None,
+        "total_ret": total_ret * 100,
+        "bench_ret": bench * 100,
+    }
+
+
+def run_evaluation(feat):
+    """بک‌تست (۷۰٪ اول داده) + فورواردتست واقعی (۳۰٪ آخر، خارج از نمونه)."""
+    try:
+        if feat is None or len(feat) < 60:
+            return None
+        split = max(35, int(len(feat) * 0.7))
+        out = {"split_date": str(feat["date"].iloc[split]), "strats": {}}
+        for st in STRATEGIES:
+            ins = bt_stats_range(feat, st, 30, split)
+            oos = bt_stats_range(feat, st, split, len(feat) - 1)
+            out["strats"][st["id"]] = {"ins": ins, "oos": oos}
+        return out
+    except Exception:
+        return None
+
+
+def consensus_votes(feat):
+    """رأی هر ۵ استراتژی در لحظه فعلی: (خرید، فروش، خنثی)."""
+    buy = sell = neu = 0
+    if feat is not None:
+        i = len(feat) - 1
+        for st in STRATEGIES:
+            s, _ = st["fn"](feat, i)
+            if s >= st["thr"] * 0.6:
+                buy += 1
+            elif s <= -st["thr"] * 0.6:
+                sell += 1
+            else:
+                neu += 1
+    return buy, sell, neu
+
+
 # ====================== موتور اجرا ======================
 def fn(v):
     """عدد با جداکننده هزارگان و ارقام فارسی."""
@@ -486,7 +547,14 @@ def fp(v):
     return fa(format(v, "+.2f")) + "٪"
 
 
-def run_strategy(feat, strat):
+def fhit(blk):
+    """وین‌ریت یک بلوک آماری به‌صورت درصد فارسی یا —."""
+    if blk and blk.get("hit") is not None:
+        return fa(format(blk["hit"], ".0f")) + "٪"
+    return "—"
+
+
+def run_strategy(feat, strat, cons=0.0):
     i = len(feat) - 1
     score, reasons = strat["fn"](feat, i)
     norm = score / strat["thr"]
@@ -501,8 +569,10 @@ def run_strategy(feat, strat):
     else:
         regime, signal = "رنج / نامشخص", "خنثی / نظاره‌گر"
 
+    # تعدیل اطمینان و احتمال با اجماع سایر استراتژی‌ها
     conf = max(42, min(92, 52 + abs(norm) * 22))
-    p_up = max(12, min(88, 50 + norm * 16))
+    conf = max(40, min(94, conf + cons * 9))
+    p_up = max(12, min(88, 50 + norm * 16 + cons * 5))
     return {"score": score, "norm": norm, "reasons": reasons,
             "regime": regime, "signal": signal,
             "confidence": conf, "p_up": p_up, "p_down": 100 - p_up}
@@ -557,7 +627,8 @@ def theo_now(live):
     return theoretical(ounce, usd)
 
 
-def build_market_report(live, feat, sig, strat, bt, lv, pred, z_prem):
+def build_market_report(live, feat, sig, strat, bt, lv, pred, z_prem,
+                        fwd=None, split_date=None, votes=None):
     j_date, j_time, j_wd = to_jalali()
     usd_p = (live.get("usd") or {}).get("price") or 0
     g18 = (live.get("gold18") or {}).get("price") or 0
@@ -593,7 +664,21 @@ def build_market_report(live, feat, sig, strat, bt, lv, pred, z_prem):
         f"احتمال رشد: {pup_s} | احتمال نزول: {pdn_s}",
     ]
     if hit_s:
-        lines.append(f"وین‌ریت تاریخی این استراتژی: {hit_s} ({n_s} سیگنال)")
+        lines.append(f"وین‌ریت بک‌تست این استراتژی: {hit_s} ({n_s} سیگنال)")
+    if votes:
+        bv, sv, nv = votes
+        lines.append(f"اجماع استراتژی‌ها: {fa(str(bv))} خرید | {fa(str(sv))} فروش | {fa(str(nv))} خنثی")
+    if fwd:
+        lines += ["", "🧪 فورواردتست (داده خارج از نمونه):"]
+        if split_date:
+            lines.append(f"شروع بازه آزمون: {fa(split_date)}")
+        fh_s = fa(format(fwd["hit"], ".0f")) + "٪" if fwd.get("hit") is not None else "—"
+        fn_s = fa(str(fwd["n"])) if fwd.get("n") else "۰"
+        lines.append(f"وین‌ریت: {fh_s} | تعداد سیگنال: {fn_s}")
+        if fwd.get("avg_ret") is not None:
+            lines.append(f"میانگین بازده هر سیگنال: {fp(fwd['avg_ret'])}")
+        if fwd.get("n"):
+            lines.append(f"بازده تجمعی سیگنال‌ها: {fp(fwd['total_ret'])} در برابر بازار: {fp(fwd['bench_ret'])}")
     if sig["reasons"]:
         lines += ["", "دلایل سیگنال:"]
         for rs in sig["reasons"][:6]:
@@ -633,7 +718,7 @@ def build_market_report(live, feat, sig, strat, bt, lv, pred, z_prem):
     return "\n".join(lines)
 
 
-def build_signal_text(sig, strat, lv, g18):
+def build_signal_text(sig, strat, lv, g18, votes=None):
     j_date, j_time, j_wd = to_jalali()
     conf_s = fa(format(sig["confidence"], ".0f")) + "٪"
     pup_s = fa(format(sig["p_up"], ".0f")) + "٪"
@@ -648,6 +733,9 @@ def build_signal_text(sig, strat, lv, g18):
         f"احتمال رشد / نزول: {pup_s} / {pdn_s}",
         f"طلای ۱۸ عیار: {fn(g18)}",
     ]
+    if votes:
+        bv, sv, nv = votes
+        lines.append(f"اجماع: {fa(str(bv))} خرید / {fa(str(sv))} فروش / {fa(str(nv))} خنثی از {fa(str(len(STRATEGIES)))} استراتژی")
     if lv:
         if lv.get("sl"):
             lines += [f"ورود: {fn(lv['entry'])}",
@@ -668,7 +756,16 @@ if not live.get("gold18"):
     st.stop()
 
 g_price = live["gold18"]["price"]
-bts = backtest_all(feat) if feat is not None else {}
+eval_ = run_evaluation(feat) if feat is not None else None
+if eval_:
+    bts = {sid: v["ins"] for sid, v in eval_["strats"].items()}
+    fwd = {sid: v["oos"] for sid, v in eval_["strats"].items()}
+    split_date = eval_["split_date"]
+else:
+    bts, fwd, split_date = {}, {}, None
+
+buy_v, sell_v, neu_v = consensus_votes(feat)
+cons = (buy_v - sell_v) / max(1, len(STRATEGIES))
 
 strat_options = []
 for s_ in STRATEGIES:
@@ -688,7 +785,7 @@ selected = st.selectbox(
 strat = STRATEGIES[strat_options.index(selected)]
 
 if feat is not None:
-    sig = run_strategy(feat, strat)
+    sig = run_strategy(feat, strat, cons)
 else:
     sig = {"score": 0, "norm": 0, "reasons": ["داده تاریخی ناکافی"],
            "regime": "نامشخص", "signal": "خنثی / نظاره‌گر",
@@ -699,8 +796,9 @@ z_prem = prem_z_at(feat, len(feat) - 1) if feat is not None else None
 theo = theo_now(live)
 prem = ((g_price - theo) / theo * 100) if theo else None
 
-report_text = build_market_report(live, feat, sig, strat, bts.get(strat["id"]), lv, pred, z_prem)
-signal_text = build_signal_text(sig, strat, lv, g_price)
+report_text = build_market_report(live, feat, sig, strat, bts.get(strat["id"]), lv, pred, z_prem,
+                                  fwd.get(strat["id"]), split_date, (buy_v, sell_v, neu_v))
+signal_text = build_signal_text(sig, strat, lv, g_price, (buy_v, sell_v, neu_v))
 
 # ====================== هدر ======================
 j_date, j_time, j_wd = to_jalali()
@@ -755,7 +853,7 @@ with st.expander("📋 مشاهده و کپی متن گزارش"):
     st.code(report_text, language=None)
 
 # ====================== تب‌ها ======================
-t1, t2, t3, t4, t5 = st.tabs(["🎯 سیگنال", "🔮 پیش‌بینی", "📊 اندیکاتورها", "⚖️ مقایسه استراتژی‌ها", "📈 روند قیمت"])
+t1, t2, t3, t4, t5, t6 = st.tabs(["🎯 سیگنال", "🔮 پیش‌بینی", "📊 اندیکاتورها", "⚖️ مقایسه استراتژی‌ها", "🧪 بک‌تست و فورواردتست", "📈 روند قیمت"])
 
 with t1:
     sig_class = "buy" if "خرید" in sig["signal"] else "sell" if "فروش" in sig["signal"] else "neutral"
@@ -769,7 +867,13 @@ with t1:
     m2.metric("احتمال نزول", fa(format(sig["p_down"], ".0f")) + "٪")
     m3.metric("امتیاز استراتژی", fa(format(sig["score"], "+.1f")))
     b = bts.get(strat["id"])
-    m4.metric("وین‌ریت تاریخی", fa(format(b["hit"], ".0f")) + "٪" if b else "—")
+    m4.metric("وین‌ریت بک‌تست", fa(format(b["hit"], ".0f")) + "٪" if b else "—")
+    f_ = fwd.get(strat["id"])
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("وین‌ریت فورواردتست", fhit(f_))
+    m6.metric("بازده/سیگنال (فوروارد)", fp(f_["avg_ret"]) if f_ and f_.get("avg_ret") is not None else "—")
+    m7.metric("اجماع خرید", fa(str(buy_v)) + " از " + fa(str(len(STRATEGIES))))
+    m8.metric("اجماع فروش", fa(str(sell_v)) + " از " + fa(str(len(STRATEGIES))))
 
     if lv:
         st.markdown('<div class="section">سطوح معامله</div>', unsafe_allow_html=True)
@@ -833,28 +937,67 @@ with t3:
         st.warning("داده تاریخی کافی برای محاسبه اندیکاتورها نیست.")
 
 with t4:
-    st.caption("وین‌ریت = سهم سیگنال‌هایی که جهت روز بعد را درست حدس زده‌اند (بک‌تست روی همین نماد).")
-    html = ("<table class='ind'><tr><th>استراتژی</th><th>سیگنال فعلی</th>"
-            "<th style='text-align:left'>وین‌ریت</th><th style='text-align:left'>تعداد سیگنال</th></tr>")
-    for s_ in STRATEGIES:
-        sc_, _ = s_["fn"](feat, len(feat) - 1)
-        if sc_ >= s_["thr"] * 0.6:
-            cur = "خرید"
-        elif sc_ <= -s_["thr"] * 0.6:
-            cur = "فروش"
-        else:
-            cur = "خنثی"
-        b = bts.get(s_["id"])
-        hit = fa(format(b["hit"], ".0f")) + "٪" if b else "—"
-        n = fa(str(b["n"])) if b else "—"
-        html += (f"<tr><td>{s_['name']}</td><td>{cur}</td>"
-                 f"<td class='v'>{hit}</td><td class='v'>{n}</td></tr>")
-    html += "</table>"
-    st.markdown(html, unsafe_allow_html=True)
-    for s_ in STRATEGIES:
-        st.caption(f"**{s_['name']}**: {s_['desc']}")
+    st.caption("وین‌ریت = سهم سیگنال‌هایی که جهت روز بعد را درست حدس زده‌اند. فورواردتست روی ۳۰٪ آخر داده (خارج از نمونه) محاسبه می‌شود.")
+    if feat is not None:
+        html = ("<table class='ind'><tr><th>استراتژی</th><th>سیگنال فعلی</th>"
+                "<th style='text-align:left'>وین‌ریت بک‌تست</th>"
+                "<th style='text-align:left'>وین‌ریت فورواردتست</th>"
+                "<th style='text-align:left'>بازده/سیگنال (فوروارد)</th></tr>")
+        for s_ in STRATEGIES:
+            sc_, _ = s_["fn"](feat, len(feat) - 1)
+            if sc_ >= s_["thr"] * 0.6:
+                cur = "خرید"
+            elif sc_ <= -s_["thr"] * 0.6:
+                cur = "فروش"
+            else:
+                cur = "خنثی"
+            b = bts.get(s_["id"])
+            hit = fa(format(b["hit"], ".0f")) + "٪" if b else "—"
+            f_ = fwd.get(s_["id"])
+            oos_hit = fhit(f_)
+            oos_avg = fp(f_["avg_ret"]) if f_ and f_.get("avg_ret") is not None else "—"
+            html += (f"<tr><td>{s_['name']}</td><td>{cur}</td>"
+                     f"<td class='v'>{hit}</td><td class='v'>{oos_hit}</td>"
+                     f"<td class='v'>{oos_avg}</td></tr>")
+        html += "</table>"
+        st.markdown(html, unsafe_allow_html=True)
+        for s_ in STRATEGIES:
+            st.caption(f"**{s_['name']}**: {s_['desc']}")
+    else:
+        st.warning("داده تاریخی کافی برای مقایسه نیست.")
 
 with t5:
+    if eval_:
+        st.caption("بک‌تست روی ۷۰٪ اول داده انجام می‌شود؛ فورواردتست روی ۳۰٪ آخر که مدل هرگز ندیده (خارج از نمونه). بازده‌ها مجموع بازدهِ روزِ بعدِ سیگنال‌هاست؛ «بازده بازار» یعنی همان روزها صرفاً خرید و نگهداری.")
+        if split_date:
+            st.caption("تاریخ شروع داده آزمون (فورواردتست): " + fa(split_date))
+        html = ("<table class='ind'><tr><th>استراتژی</th><th>بازه</th>"
+                "<th style='text-align:left'>سیگنال‌ها</th>"
+                "<th style='text-align:left'>وین‌ریت</th>"
+                "<th style='text-align:left'>میانگین بازده/سیگنال</th>"
+                "<th style='text-align:left'>بازده کل</th>"
+                "<th style='text-align:left'>بازده بازار</th></tr>")
+        for s_ in STRATEGIES:
+            v = eval_["strats"].get(s_["id"], {})
+            for tag, blk in [("بک‌تست", v.get("ins")), ("فوروارد", v.get("oos"))]:
+                if blk is None:
+                    continue
+                n_s = fa(str(blk["n"]))
+                h_s = fhit(blk)
+                a_s = fp(blk["avg_ret"]) if blk.get("avg_ret") is not None else "—"
+                t_s = fp(blk["total_ret"])
+                b_s = fp(blk["bench_ret"])
+                html += (f"<tr><td>{s_['name']}</td><td>{tag}</td>"
+                         f"<td class='v'>{n_s}</td><td class='v'>{h_s}</td>"
+                         f"<td class='v'>{a_s}</td><td class='v'>{t_s}</td>"
+                         f"<td class='v'>{b_s}</td></tr>")
+        html += "</table>"
+        st.markdown(html, unsafe_allow_html=True)
+        st.info("فورواردتست معتبرترین سنجه است: عملکرد استراتژی روی داده‌ای که در ساختن یا تنظیم آن هیچ نقشی نداشته. اگر وین‌ریت فوروارد نزدیک بک‌تست باشد، استراتژی پایدار است.")
+    else:
+        st.warning("داده تاریخی کافی برای بک‌تست و فورواردتست نیست.")
+
+with t6:
     if feat is not None and len(feat) > 8:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         fig.add_trace(go.Scatter(x=feat["date"], y=feat["gold18"], name="طلای ۱۸ عیار",
