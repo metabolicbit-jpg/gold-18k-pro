@@ -326,6 +326,12 @@ def build_dataset():
     return feat
 
 
+# ====================== پارامترهای موتور (بر اساس سند مرجع) ======================
+HORIZON_DAYS = 5   # افق تصمیم؛ تنها پارامتری که در آزمون پایداری یکنوا بود
+COST_PCT = 0.45    # هزینه رفت‌وبرگشت معامله (درصد)
+COST_MULT = 1.15   # ضریب حاشیه آستانه دروازه هزینه
+
+
 # ====================== استراتژی‌ها ======================
 def prem_z_at(d, i):
     try:
@@ -486,12 +492,19 @@ def backtest_all(feat):
 
 
 def bt_stats_range(feat, strat, i0, i1):
-    """آمار واقعی روی یک بازه: تعداد سیگنال، وین‌ریت، میانگین بازده هر سیگنال،
-    بازده تجمعی سیگنال‌ها و بازده بازار (خرید و نگهداری) در همان بازه."""
+    """آمار واقعی روی یک بازه: نتیجه روز بعد + افق ۵روزه + آمار جهت‌دار
+    (برای قاعده سرخ کالیبراسیون). خروجی: تعداد سیگنال، وین‌ریت، میانگین بازده
+    هر سیگنال، بازده تجمعی، بازده بازار، وین‌ریت/بازده ۵روزه، وین‌ریت جداگانه
+    سیگنال‌های خرید و فروش."""
     d = feat
+    n = len(d)
     sigs = wins = 0
     total_ret = 0.0
     bench = 0.0
+    sigs5 = wins5 = 0
+    total5 = 0.0
+    buy_n = buy_w = sell_n = sell_w = 0
+    g = d["gold18"]
     for i in range(i0, i1):
         s, _ = strat["fn"](d, i)
         r = d.iloc[i + 1]["ret"]
@@ -505,12 +518,36 @@ def bt_stats_range(feat, strat, i0, i1):
             total_ret += rr
             if rr > 0:
                 wins += 1
+            if pos > 0:
+                buy_n += 1
+                if rr > 0:
+                    buy_w += 1
+            else:
+                sell_n += 1
+                if rr > 0:
+                    sell_w += 1
+            j = i + HORIZON_DAYS
+            if j < n:
+                g_i, g_j = g.iloc[i], g.iloc[j]
+                if g_i and g_j and not pd.isna(g_i) and not pd.isna(g_j):
+                    r5 = pos * (g_j / g_i - 1)
+                    sigs5 += 1
+                    total5 += r5
+                    if r5 > 0:
+                        wins5 += 1
     return {
         "n": sigs,
         "hit": (wins / sigs * 100) if sigs else None,
         "avg_ret": (total_ret / sigs * 100) if sigs else None,
         "total_ret": total_ret * 100,
         "bench_ret": bench * 100,
+        "n5": sigs5,
+        "hit5": (wins5 / sigs5 * 100) if sigs5 else None,
+        "avg5": (total5 / sigs5 * 100) if sigs5 else None,
+        "buy_n": buy_n,
+        "buy_hit": (buy_w / buy_n * 100) if buy_n else None,
+        "sell_n": sell_n,
+        "sell_hit": (sell_w / sell_n * 100) if sell_n else None,
     }
 
 
@@ -567,7 +604,17 @@ def fhit(blk):
     return "—"
 
 
-def run_strategy(feat, strat, cons=0.0):
+def fhit5(blk):
+    """وین‌ریت افق ۵روزه یک بلوک آماری؛ نمونه زیر ۱۰ سیگنال علامت هشدار می‌گیرد."""
+    if blk and blk.get("hit5") is not None:
+        s = fa(format(blk["hit5"], ".0f")) + "٪"
+        if blk.get("n5", 0) < 10:
+            s += " ⚠️"
+        return s
+    return "—"
+
+
+def run_strategy(feat, strat, cons=0.0, bt=None):
     i = len(feat) - 1
     score, reasons = strat["fn"](feat, i)
     norm = score / strat["thr"]
@@ -586,9 +633,50 @@ def run_strategy(feat, strat, cons=0.0):
     conf = max(42, min(92, 52 + abs(norm) * 22))
     conf = max(40, min(94, conf + cons * 9))
     p_up = max(12, min(88, 50 + norm * 16 + cons * 5))
+
+    # قاعده سرخ کالیبراسیون: اگر تاریخچه جهتِ سیگنال را تأیید نکند، احتمال به ۵۰
+    # برمی‌گردد (لبه صفر می‌شود) و هرگز جهت بی‌صدا معکوس نمی‌شود.
+    calib_note = None
+    dirn = None
+    if signal.startswith("خرید"):
+        dirn = "buy"
+    elif signal.startswith("فروش"):
+        dirn = "sell"
+    if bt is not None and dirn:
+        if dirn == "buy" and (bt.get("buy_n") or 0) >= 5 and bt.get("buy_hit") is not None and bt["buy_hit"] < 50:
+            p_up = 50.0
+            calib_note = "تاریخچه جهت خرید این استراتژی را تأیید نمی‌کند؛ احتمال به ۵۰٪ برگشت."
+        elif dirn == "sell" and (bt.get("sell_n") or 0) >= 5 and bt.get("sell_hit") is not None and bt["sell_hit"] < 50:
+            p_up = 50.0
+            calib_note = "تاریخچه جهت فروش این استراتژی را تأیید نمی‌کند؛ احتمال به ۵۰٪ برگشت."
+
+    p_down = 100 - p_up
+
+    # دروازه هزینه: لبه انتظاری افق ۵روزه باید از هزینه رفت‌وبرگشت بیشتر شود،
+    # وگرنه خروجی «نظاره» است — پرشمارترین و درست‌ترین خروجی موتور.
+    p_dir = p_up if dirn == "buy" else p_down if dirn == "sell" else 50.0
+    try:
+        v = feat["ret"].tail(10).std()
+        vol = v * 100 if (v is not None and not np.isnan(v) and v > 0) else 1.2
+    except Exception:
+        vol = 1.2
+    edge = (2 * p_dir / 100 - 1) * 0.8 * vol * (HORIZON_DAYS ** 0.5)
+    edge_thr = COST_PCT * COST_MULT
+    gated = dirn is not None and abs(edge) < edge_thr
+    raw_signal = signal
+    if gated:
+        signal = "نظاره — لبه زیر هزینه"
+    else:
+        reasons = list(reasons) + [
+            "لبه انتظاری " + fa(str(HORIZON_DAYS)) + "روزه: " + fp(edge)
+            + " در برابر آستانه هزینه " + fp(edge_thr)
+        ]
+
     return {"score": score, "norm": norm, "reasons": reasons,
-            "regime": regime, "signal": signal,
-            "confidence": conf, "p_up": p_up, "p_down": 100 - p_up}
+            "regime": regime, "signal": signal, "raw_signal": raw_signal,
+            "confidence": conf, "p_up": p_up, "p_down": p_down,
+            "edge": edge, "edge_thr": edge_thr, "gated": gated,
+            "dirn": dirn, "calib_note": calib_note}
 
 
 def make_levels(feat, g_price, signal):
@@ -676,6 +764,13 @@ def build_market_report(live, feat, sig, strat, bt, lv, pred, z_prem,
         f"رژیم بازار: {sig['regime']}",
         f"احتمال رشد: {pup_s} | احتمال نزول: {pdn_s}",
     ]
+    if sig.get("dirn") and sig.get("edge") is not None:
+        lines.append("لبه انتظاری " + fa(str(HORIZON_DAYS)) + "روزه: " + fp(sig["edge"])
+                     + " | آستانه هزینه: " + fp(sig["edge_thr"]))
+        if sig.get("gated"):
+            lines.append("دروازه هزینه: سیگنال به نظاره تبدیل شد (لبه < هزینه رفت‌وبرگشت).")
+    if sig.get("calib_note"):
+        lines.append("کالیبراسیون: " + sig["calib_note"])
     if hit_s:
         lines.append(f"وین‌ریت بک‌تست این استراتژی: {hit_s} ({n_s} سیگنال)")
     if votes:
@@ -746,6 +841,11 @@ def build_signal_text(sig, strat, lv, g18, votes=None):
         f"احتمال رشد / نزول: {pup_s} / {pdn_s}",
         f"طلای ۱۸ عیار: {fn(g18)}",
     ]
+    if sig.get("dirn") and sig.get("edge") is not None:
+        lines.append("لبه انتظاری " + fa(str(HORIZON_DAYS)) + "روزه: " + fp(sig["edge"])
+                     + " | آستانه هزینه: " + fp(sig["edge_thr"]))
+    if sig.get("calib_note"):
+        lines.append("کالیبراسیون: " + sig["calib_note"])
     if votes:
         bv, sv, nv = votes
         lines.append(f"اجماع: {fa(str(bv))} خرید / {fa(str(sv))} فروش / {fa(str(nv))} خنثی از {fa(str(len(STRATEGIES)))} استراتژی")
@@ -784,13 +884,20 @@ AUTO_LABEL = "🏆 خودکار — بهترین بر اساس فورواردت�
 
 
 def pick_best_strategy():
-    """استراتژی با بهترین میانگین بازده در فورواردتست (حداقل ۵ سیگنال)."""
+    """استراتژی با بهترین میانگین بازده افق ۵روزه در فورواردتست (حداقل ۵ سیگنال)؛
+    اگر نمونه ۵روزه کم بود، میانگین روز بعد."""
     best, best_key = None, None
     for s_ in STRATEGIES:
         f = fwd.get(s_["id"])
-        if f and f.get("n", 0) >= 5 and f.get("avg_ret") is not None:
-            if best_key is None or f["avg_ret"] > best_key:
-                best, best_key = s_, f["avg_ret"]
+        if not f:
+            continue
+        key = None
+        if f.get("n5", 0) >= 5 and f.get("avg5") is not None:
+            key = f["avg5"]
+        elif f.get("n", 0) >= 5 and f.get("avg_ret") is not None:
+            key = f["avg_ret"]
+        if key is not None and (best_key is None or key > best_key):
+            best, best_key = s_, key
     return best if best is not None else STRATEGIES[0]
 
 
@@ -802,7 +909,7 @@ selected = st.selectbox(
     "استراتژی سیگنال‌دهی",
     strat_options,
     index=0,
-    help="گزینه خودکار استراتژی با بهترین میانگین بازده در فورواردتست (حداقل ۵ سیگنال) را برمی‌گزیند. علامت ⚠️ یعنی نمونه زیر ۱۰ سیگنال و عدد از نظر آماری قابل اتکا نیست."
+    help="گزینه خودکار استراتژی با بهترین میانگین بازده افق ۵روزه در فورواردتست (حداقل ۵ سیگنال) را برمی‌گزیند. علامت ⚠️ یعنی نمونه زیر ۱۰ سیگنال و عدد از نظر آماری قابل اتکا نیست."
 )
 if selected == AUTO_LABEL:
     strat = pick_best_strategy()
@@ -810,11 +917,14 @@ else:
     strat = STRATEGIES[strat_options.index(selected) - 1]
 
 if feat is not None:
-    sig = run_strategy(feat, strat, cons)
+    sig = run_strategy(feat, strat, cons, bts.get(strat["id"]))
 else:
     sig = {"score": 0, "norm": 0, "reasons": ["داده تاریخی ناکافی"],
            "regime": "نامشخص", "signal": "خنثی / نظاره‌گر",
-           "confidence": 45, "p_up": 50, "p_down": 50}
+           "raw_signal": "خنثی / نظاره‌گر",
+           "confidence": 45, "p_up": 50, "p_down": 50,
+           "edge": 0.0, "edge_thr": COST_PCT * COST_MULT,
+           "gated": False, "dirn": None, "calib_note": None}
 lv = make_levels(feat, g_price, sig["signal"])
 pred = make_pred(feat, g_price, sig["p_up"]) if feat is not None else None
 z_prem = prem_z_at(feat, len(feat) - 1) if feat is not None else None
@@ -883,10 +993,17 @@ t1, t2, t3, t4, t5, t6 = st.tabs(["🎯 سیگنال", "🔮 پیش‌بینی",
 with t1:
     sig_class = "buy" if "خرید" in sig["signal"] else "sell" if "فروش" in sig["signal"] else "neutral"
     conf_s = fa(format(sig["confidence"], ".0f")) + "٪"
+    box_line = sig["signal"] + "  •  اطمینان " + conf_s
+    if sig.get("gated"):
+        box_line += "  •  لبه " + fp(sig["edge"]) + " < هزینه " + fp(sig["edge_thr"])
     st.markdown(
-        f'<div class="signal-box {sig_class}">{sig["signal"]}  •  اطمینان {conf_s}</div>',
+        f'<div class="signal-box {sig_class}">{box_line}</div>',
         unsafe_allow_html=True
     )
+    if sig.get("gated"):
+        st.caption("دروازه هزینه فعال است: لبه انتظاری افق ۵روزه کمتر از هزینه رفت‌وبرگشت (×۱٫۱۵) است، پس خروجی درست «نظاره» است.")
+    if sig.get("calib_note"):
+        st.caption("⚖️ " + sig["calib_note"])
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("احتمال رشد", fa(format(sig["p_up"], ".0f")) + "٪")
     m2.metric("احتمال نزول", fa(format(sig["p_down"], ".0f")) + "٪")
@@ -899,6 +1016,13 @@ with t1:
     m6.metric("بازده/سیگنال (فوروارد)", fp(f_["avg_ret"]) if f_ and f_.get("avg_ret") is not None else "—")
     m7.metric("اجماع خرید", fa(str(buy_v)) + " از " + fa(str(len(STRATEGIES))))
     m8.metric("اجماع فروش", fa(str(sell_v)) + " از " + fa(str(len(STRATEGIES))))
+    n9, n10, n11, n12 = st.columns(4)
+    n9.metric("لبه انتظاری (" + fa(str(HORIZON_DAYS)) + "روزه)",
+              fp(sig["edge"]) if sig.get("edge") is not None else "—")
+    n10.metric("آستانه هزینه", fp(sig.get("edge_thr") or COST_PCT * COST_MULT))
+    n11.metric("دروازه هزینه", "عبور ✓" if sig.get("dirn") and not sig.get("gated")
+               else ("نظاره" if sig.get("dirn") else "—"))
+    n12.metric("وین‌ریت ۵روزه (فوروارد)", fhit5(f_))
 
     if lv:
         st.markdown('<div class="section">سطوح معامله</div>', unsafe_allow_html=True)
@@ -996,12 +1120,13 @@ with t4:
 
 with t5:
     if eval_:
-        st.caption("بک‌تست روی ۷۰٪ اول داده انجام می‌شود؛ فورواردتست روی ۳۰٪ آخر که مدل هرگز ندیده (خارج از نمونه). بازده‌ها مجموع بازدهِ روزِ بعدِ سیگنال‌هاست؛ «بازده بازار» یعنی همان روزها صرفاً خرید و نگهداری.")
+        st.caption("بک‌تست روی ۷۰٪ اول داده انجام می‌شود؛ فورواردتست روی ۳۰٪ آخر که مدل هرگز ندیده (خارج از نمونه). بازده‌ها مجموع بازدهِ روزِ بعدِ سیگنال‌هاست؛ «بازده بازار» یعنی همان روزها صرفاً خرید و نگهداری. وین‌ریت ۵روزه یعنی جهتِ درست تا ۵ روز بعد — افق ۵روزه در آزمون‌های مرجع تنها پارامتر یکنوا بود.")
         if split_date:
             st.caption("تاریخ شروع داده آزمون (فورواردتست): " + fa(split_date))
         html = ("<table class='ind'><tr><th>استراتژی</th><th>بازه</th>"
                 "<th style='text-align:left'>سیگنال‌ها</th>"
                 "<th style='text-align:left'>وین‌ریت</th>"
+                "<th style='text-align:left'>وین‌ریت ۵روزه</th>"
                 "<th style='text-align:left'>میانگین بازده/سیگنال</th>"
                 "<th style='text-align:left'>بازده کل</th>"
                 "<th style='text-align:left'>بازده بازار</th></tr>")
@@ -1012,11 +1137,13 @@ with t5:
                     continue
                 n_s = fa(str(blk["n"]))
                 h_s = fhit(blk)
+                h5_s = fhit5(blk)
                 a_s = fp(blk["avg_ret"]) if blk.get("avg_ret") is not None else "—"
                 t_s = fp(blk["total_ret"])
                 b_s = fp(blk["bench_ret"])
                 html += (f"<tr><td>{s_['name']}</td><td>{tag}</td>"
                          f"<td class='v'>{n_s}</td><td class='v'>{h_s}</td>"
+                         f"<td class='v'>{h5_s}</td>"
                          f"<td class='v'>{a_s}</td><td class='v'>{t_s}</td>"
                          f"<td class='v'>{b_s}</td></tr>")
         html += "</table>"
