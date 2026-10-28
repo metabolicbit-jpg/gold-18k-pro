@@ -2,7 +2,7 @@
 # 📂 مسیر ریپو: stability.py
 # آزمون پایداری: همان موتورِ اپ را روی ۱۰۸ ترکیب تنظیمات می‌آزماید تا معلوم شود
 # کارنامه لبهٔ واقعی دارد یا فقط به یک تنظیمِ خوش‌شانس چسبیده است.
-# اجرا: python stability.py   (فایل app.py باید کنارش باشد)
+# اجرا: python stability.py   (فایل app.py باید کنارش باشد) — پایتون ۳.۸ به بالا
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def get_history(engine) -> pd.DataFrame | None:
     return None
 
 
-def run_one(engine, hist, overrides: dict) -> dict | None:
+def run_one(engine, hist, overrides: dict):
     base = dict(engine.CFG)
     try:
         engine.CFG.update(overrides)
@@ -74,13 +74,12 @@ def run_one(engine, hist, overrides: dict) -> dict | None:
         engine.CFG.update(base)
 
 
-def verdict(df: pd.DataFrame) -> str:
-    ok = df.dropna(subset=["PF"])
-    if ok.empty:
+def verdict(pf: pd.Series, dd: pd.Series) -> str:
+    if pf.empty:
         return "هیچ ترکیبی معامله‌ای تولید نکرد؛ با این داده نمی‌شود قضاوت کرد."
-    share = float((ok["PF"] > 1.3).mean() * 100)
-    med_pf = float(median(ok["PF"]))
-    med_dd = float(median(ok["افت (٪)"].dropna()))
+    share = float((pf > 1.3).mean() * 100)
+    med_pf = float(median(pf))
+    med_dd = float(median(dd)) if not dd.empty else 0.0
     if med_pf >= 1.3 and share >= 60 and med_dd > -15:
         return "پایدار: لبه در بیشتر ترکیب‌ها می‌مانَد."
     if med_pf >= 1.15 and share >= 40:
@@ -98,7 +97,7 @@ def main() -> int:
     base_cfg = {k: engine.CFG.get(k) for k in GRID}
     print("آزمون پایداری Gold18K")
     print(f"  پنجرهٔ تاریخ: {len(hist)} روز")
-    print(f"  پیکربندی پایه: " + " · ".join(f"{PARAM_FA[k]}={v}" for k, v in base_cfg.items()))
+    print("  پیکربندی پایه: " + " · ".join(f"{PARAM_FA[k]}={v}" for k, v in base_cfg.items()))
     print(f"  ترکیب‌ها: {len(list(itertools.product(*GRID.values())))}\n")
 
     rows = []
@@ -108,28 +107,32 @@ def main() -> int:
         out = run_one(engine, hist, cfg)
         if out is None:
             continue
-        rows.append({PARAM_FA[k]: cfg[k] for k in keys} | out)
+        row = {PARAM_FA[k]: cfg[k] for k in keys}
+        row.update(out)
+        rows.append(row)
 
     if not rows:
         print("هیچ ترکیبی نتیجه نداد.")
         return 1
 
     df = pd.DataFrame(rows)
-    with pd.option_context("display.max_rows", 200, "display.width", 120):
+    with pd.option_context("display.max_rows", 200, "display.width", 130):
         print(df.to_string(index=False))
 
     ok = df.dropna(subset=["PF"])
+    pf = ok["PF"].astype(float)
+    wr = ok["نرخ برد"].dropna().astype(float)
+    dd = ok["افت (٪)"].dropna().astype(float)
+
     print("\n──────── خلاصه ────────")
     print(f"  ترکیب‌های معامله‌دار: {len(ok)} از {len(df)}")
-    if not ok.empty:
-        print(f"  نرخ برد   : میانه {median(ok['نرخ برد'].dropna()):.1f}٪ "
-              f"(بازهٔ {ok['نرخ برد'].min():.1f} تا {ok['نرخ برد'].max():.1f})")
-        print(f"  Profit Factor: میانه {median(ok['PF']):.2f} "
-              f"(بازهٔ {ok['PF'].min():.2f} تا {ok['PF'].max():.2f})")
-        dd = ok["افت (٪)"].dropna()
-        if not dd.empty:
-            print(f"  حداکثر افت: میانه {median(dd):.1f}٪ (بدترین {dd.min():.1f}٪)")
-        print(f"  سهم ترکیب‌های با PF>1.3: {100 * (ok['PF'] > 1.3).mean():.0f}٪")
+    if not wr.empty:
+        print(f"  نرخ برد   : میانه {median(wr):.1f}٪ (بازهٔ {wr.min():.1f} تا {wr.max():.1f})")
+    if not pf.empty:
+        print(f"  Profit Factor: میانه {median(pf):.2f} (بازهٔ {pf.min():.2f} تا {pf.max():.2f})")
+        print(f"  سهم ترکیب‌های با PF>1.3: {100 * (pf > 1.3).mean():.0f}٪")
+    if not dd.empty:
+        print(f"  حداکثر افت: میانه {median(dd):.1f}٪ (بدترین {dd.min():.1f}٪)")
 
     print("\n──────── حساسیت به هر پارامتر ────────")
     for k in keys:
@@ -141,7 +144,7 @@ def main() -> int:
                            for idx, val in grp.items())
         print(f"  {col}: {parts}")
 
-    print(f"\nحکم: {verdict(ok)}")
+    print(f"\nحکم: {verdict(pf, dd)}")
     return 0
 
 
