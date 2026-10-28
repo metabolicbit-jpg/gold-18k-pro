@@ -1,8 +1,9 @@
 # ========== Gold18K Pro · stability.py ==========
 # 📂 مسیر ریپو: stability.py
-# آزمون پایداری: همان موتورِ اپ را روی ۱۰۸ ترکیب تنظیمات می‌آزماید تا معلوم شود
-# کارنامه لبهٔ واقعی دارد یا فقط به یک تنظیمِ خوش‌شانس چسبیده است.
-# اجرا: python stability.py   (فایل app.py باید کنارش باشد) — پایتون ۳.۸ به بالا
+# دو آزمون در یک اجرا:
+#   ۱) پایداری: همان موتور روی ۱۰۸ ترکیب تنظیمات (کل پنجره)
+#   ۲) پیش‌آزمون/پس‌آزمون: تنظیمات را روی ۷۰٪ اول انتخاب می‌کند و روی ۳۰٪ آخر که ندیده قضاوت می‌کند
+# اجرا: python stability.py   (فایل app.py باید کنارش باشد)
 
 from __future__ import annotations
 
@@ -24,48 +25,56 @@ PARAM_FA = {
     "z_win": "پنجرهٔ z",
     "knn_k": "همسایه‌ها",
 }
+TRAIN_SHARE = 0.70
+MIN_TRAIN_TRADES = 12
 
 
 def load_engine():
-    """فایل اپ را به‌عنوان ماژول وارد می‌کند، بدون اجرای رابط کاربری."""
     for name in ("app", "app_v3", "gold18k"):
         try:
             return __import__(name)
         except Exception:
             continue
-    print("فایل اپ پیدا نشد. app.py باید کنار stability.py باشد.")
+    print("فایل app پیدا نشد. app.py باید کنار stability.py باشد.")
     sys.exit(1)
 
 
-def get_history(engine) -> pd.DataFrame | None:
+def get_history(engine):
     func = getattr(engine.fetch_history, "__wrapped__", engine.fetch_history)
     for candidate in (func, engine.fetch_history):
         try:
             hist = candidate()
-            if hist is not None and len(hist) > 60:
+            if hist is not None and len(hist) > 120:
                 return hist
         except Exception:
             continue
     return None
 
 
-def run_one(engine, hist, overrides: dict):
+def metrics(trades, horizon: int = 3) -> dict:
+    if trades is None or len(trades) == 0:
+        return {"n": 0, "win": None, "pf": None, "dd": None, "total": None, "exp": None}
+    r = trades["ret"].astype(float)
+    eq = (1 + r / 100).cumprod()
+    dd = float(((eq / eq.cummax()) - 1).min() * 100)
+    wins, losses = r[r > 0], r[r <= 0]
+    pf = float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() != 0 else None
+    return {"n": len(r), "win": float((r > 0).mean() * 100), "pf": pf,
+            "dd": dd, "total": float(eq.iloc[-1] - 1) * 100, "exp": float(r.mean())}
+
+
+def run_config(engine, hist, overrides: dict):
+    """یک ترکیب را می‌آزماید و فهرست معاملات را برمی‌گرداند (بدون تغییر ماندگار در CFG)."""
     base = dict(engine.CFG)
     try:
         engine.CFG.update(overrides)
         d = engine.build_panel(hist)
         d = d.dropna(subset=["composite"]).reset_index(drop=True)
-        if len(d) < 40:
+        if len(d) < 60:
             return None
         p, _, _ = engine.walk_probability(d)
         bt = engine.run_backtest(d, p)
-        return {
-            "معامله": bt["n"],
-            "نرخ برد": None if bt["win"] is None else round(bt["win"], 1),
-            "PF": None if bt["pf"] is None else round(bt["pf"], 2),
-            "افت (٪)": None if bt["dd"] is None else round(bt["dd"], 1),
-            "بازده (٪)": None if bt["total"] is None else round(bt["total"], 1),
-        }
+        return bt["trades"]
     except Exception as e:
         print(f"  خطا در {overrides}: {type(e).__name__}")
         return None
@@ -74,17 +83,10 @@ def run_one(engine, hist, overrides: dict):
         engine.CFG.update(base)
 
 
-def verdict(pf: pd.Series, dd: pd.Series) -> str:
-    if pf.empty:
-        return "هیچ ترکیبی معامله‌ای تولید نکرد؛ با این داده نمی‌شود قضاوت کرد."
-    share = float((pf > 1.3).mean() * 100)
-    med_pf = float(median(pf))
-    med_dd = float(median(dd)) if not dd.empty else 0.0
-    if med_pf >= 1.3 and share >= 60 and med_dd > -15:
-        return "پایدار: لبه در بیشتر ترکیب‌ها می‌مانَد."
-    if med_pf >= 1.15 and share >= 40:
-        return "نیمه‌پایدار: لبه هست، ولی به تنظیمات وابسته است."
-    return "شکننده: لبه احتمالاً حاصلِ تنظیم دقیق است، نه بازار."
+def fmt(v, d: int = 2, suffix: str = "") -> str:
+    if v is None:
+        return "—"
+    return f"{v:.{d}f}{suffix}"
 
 
 def main() -> int:
@@ -94,37 +96,57 @@ def main() -> int:
         print("تاریخ روزانه به دست نیامد. اتصال شبکه را بررسی کن.")
         return 1
 
-    base_cfg = {k: engine.CFG.get(k) for k in GRID}
-    print("آزمون پایداری Gold18K")
-    print(f"  پنجرهٔ تاریخ: {len(hist)} روز")
-    print("  پیکربندی پایه: " + " · ".join(f"{PARAM_FA[k]}={v}" for k, v in base_cfg.items()))
+    split_day = hist["day"].iloc[int(len(hist) * TRAIN_SHARE)]
+    train_days = int((hist["day"] < split_day).sum())
+    test_days = len(hist) - train_days
+
+    print("آزمون Gold18K")
+    print(f"  پنجرهٔ کل: {len(hist)} روز")
+    print(f"  آموزش (انتخاب تنظیمات): {train_days} روز تا {str(split_day)[:10]}")
+    print(f"  آزمون (دادهٔ ندیده):    {test_days} روز پس از آن")
+    print("  پیکربندی پایه: " + " · ".join(f"{PARAM_FA[k]}={engine.CFG.get(k)}" for k in GRID))
     print(f"  ترکیب‌ها: {len(list(itertools.product(*GRID.values())))}\n")
 
-    rows = []
     keys = list(GRID)
+    rows, store = [], {}
     for combo in itertools.product(*GRID.values()):
         cfg = dict(zip(keys, combo))
-        out = run_one(engine, hist, cfg)
-        if out is None:
+        trades = run_config(engine, hist, cfg)
+        if trades is None:
             continue
+        tr = trades[trades["day"] < split_day] if len(trades) else trades
+        te = trades[trades["day"] >= split_day] if len(trades) else trades
+        m_all, m_tr, m_te = metrics(trades), metrics(tr), metrics(te)
+
         row = {PARAM_FA[k]: cfg[k] for k in keys}
-        row.update(out)
+        row.update({
+            "معامله": m_all["n"],
+            "نرخ برد": None if m_all["win"] is None else round(m_all["win"], 1),
+            "PF کل": None if m_all["pf"] is None else round(m_all["pf"], 2),
+            "افت کل": None if m_all["dd"] is None else round(m_all["dd"], 1),
+            "PF آموزش": None if m_tr["pf"] is None else round(m_tr["pf"], 2),
+            "معاملهٔ آموزش": m_tr["n"],
+            "PF آزمون": None if m_te["pf"] is None else round(m_te["pf"], 2),
+            "معاملهٔ آزمون": m_te["n"],
+            "نرخ برد آزمون": None if m_te["win"] is None else round(m_te["win"], 1),
+        })
         rows.append(row)
+        store[tuple(combo)] = {"cfg": cfg, "train": m_tr, "test": m_te}
 
     if not rows:
         print("هیچ ترکیبی نتیجه نداد.")
         return 1
 
     df = pd.DataFrame(rows)
-    with pd.option_context("display.max_rows", 200, "display.width", 130):
+    with pd.option_context("display.max_rows", 200, "display.width", 180):
         print(df.to_string(index=False))
 
-    ok = df.dropna(subset=["PF"])
-    pf = ok["PF"].astype(float)
+    ok = df.dropna(subset=["PF کل"])
+    pf = ok["PF کل"].astype(float)
     wr = ok["نرخ برد"].dropna().astype(float)
-    dd = ok["افت (٪)"].dropna().astype(float)
+    dd = ok["افت کل"].dropna().astype(float)
 
-    print("\n──────── خلاصه ────────")
+    print("\n──────── خلاصهٔ پایداری (کل پنجره) ────────")
     print(f"  ترکیب‌های معامله‌دار: {len(ok)} از {len(df)}")
     if not wr.empty:
         print(f"  نرخ برد   : میانه {median(wr):.1f}٪ (بازهٔ {wr.min():.1f} تا {wr.max():.1f})")
@@ -139,12 +161,78 @@ def main() -> int:
         col = PARAM_FA[k]
         if col not in df.columns:
             continue
-        grp = df.groupby(col)["PF"].median()
+        grp = df.groupby(col)["PF کل"].median()
         parts = " | ".join(f"{idx} → {val:.2f}" if pd.notna(val) else f"{idx} → —"
                            for idx, val in grp.items())
         print(f"  {col}: {parts}")
 
-    print(f"\nحکم: {verdict(pf, dd)}")
+    # ─────── پیش‌آزمون / پس‌آزمون ───────
+    print("\n════════ پیش‌آزمون / پس‌آزمون ════════")
+    print("  تنظیمات با دادهٔ آموزش انتخاب می‌شوند و روی دادهٔ آزمون قضاوت می‌شوند.\n")
+
+    eligible = [(k, v) for k, v in store.items()
+                if v["train"]["pf"] is not None and v["train"]["n"] >= MIN_TRAIN_TRADES]
+    rows2 = []
+
+    base_key = tuple(engine.CFG.get(k) for k in keys)
+    base = store.get(base_key)
+    if base is None:
+        rounded = {}
+        for kt, v in store.items():
+            try:
+                rounded[kt] = abs(v["cfg"]["cost_pct"] - engine.CFG["cost_pct"]) < 1e-9 and \
+                              v["cfg"]["horizon_days"] == engine.CFG["horizon_days"] and \
+                              v["cfg"]["z_win"] == engine.CFG["z_win"] and \
+                              v["cfg"]["knn_k"] == engine.CFG["knn_k"]
+            except Exception:
+                rounded[kt] = False
+        base = next((store[kt] for kt, ok_ in rounded.items() if ok_), None)
+
+    if base:
+        rows2.append(("تنظیم فعلی تو", base["cfg"], base["train"], base["test"]))
+
+    if eligible:
+        best_key, best = max(eligible, key=lambda kv: kv[1]["train"]["pf"])
+        rows2.append(("بهترین در آموزش", best["cfg"], best["train"], best["test"]))
+
+        med_pf = median([v["train"]["pf"] for _, v in eligible])
+        near = [v for _, v in eligible if abs(v["train"]["pf"] - med_pf) < 0.08]
+        if near:
+            pick = near[0]
+            rows2.append(("نزدیک به میانهٔ آموزش", pick["cfg"], pick["train"], pick["test"]))
+
+    head = (f"{'انتخاب':<20} {'هزینه':>6} {'افق':>4} {'z':>4} {'k':>4} "
+            f"{'PF آموزش':>9} {'PF آزمون':>9} {'برد آزمون':>10} {'افت آزمون':>10} {'معاملهٔ آزمون':>12}")
+    print(head)
+    print("─" * len(head))
+    for title, cfg, tr, te in rows2:
+        print(f"{title:<20} {cfg['cost_pct']:>6.2f} {cfg['horizon_days']:>4} {cfg['z_win']:>4} "
+              f"{cfg['knn_k']:>4} {fmt(tr['pf']):>9} {fmt(te['pf']):>9} "
+              f"{fmt(te['win'], 1, '٪'):>10} {fmt(te['dd'], 1, '٪'):>10} {te['n']:>12}")
+
+    print()
+    if not rows2:
+        print("حکم: دادهٔ کافی برای این آزمون نبود.")
+        return 0
+
+    best_row = max(rows2, key=lambda r: (r[3]["pf"] or 0))
+    te = best_row[3]
+    if te["n"] < 8:
+        print(f"حکم: در دورهٔ آزمون فقط {te['n']} معامله رخ داد؛ نمونه برای قضاوت کم است. "
+              "پنجرهٔ تاریخ را بلندتر کن یا افق را کوتاه‌تر.")
+    elif te["pf"] is None or te["pf"] < 1.0:
+        print("حکم: لبه در دورهٔ ندیده بخار شد (PF آزمون زیر ۱). یعنی عددهای خوبِ آموزش "
+              "حاصلِ تنظیم دقیق بودند، نه بازار. این موتور را فعلاً معیار تصمیم نگیر.")
+    elif te["pf"] < 1.3:
+        print(f"حکم: لبه در دورهٔ ندیده ضعیف شد ولی نمرد (PF آزمون {te['pf']:.2f}). "
+              "یعنی سیگنال ارزش دیدن دارد، ولی حاشیهٔ امن ندارد؛ حجم کوچک و ریسک پایین.")
+    else:
+        print(f"حکم: لبه در دورهٔ ندیده هم ماند (PF آزمون {te['pf']:.2f}). "
+              "این نخستین شاهد واقعی است که موتور چیزی می‌داند که در آینده هم تکرار می‌شود — "
+              "ولی ۳۰٪ داده هنوز کم است؛ ادامهٔ ثبت سیگنال لازم است.")
+
+    print("\nیادآوری: انتخاب تنظیمات با دادهٔ آموزش انجام شد و قضاوت با دادهٔ آزمون؛ "
+          "پس این اعداد خوش‌بینانه نیستند.")
     return 0
 
 
