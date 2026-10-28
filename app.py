@@ -639,7 +639,7 @@ def build_market_report(live, feat, sig, strat, bt, lv, pred, z_prem,
     conf_s = fa(format(sig["confidence"], ".0f")) + "٪"
     pup_s = fa(format(sig["p_up"], ".0f")) + "٪"
     pdn_s = fa(format(sig["p_down"], ".0f")) + "٪"
-    hit_s = fa(format(bt["hit"], ".0f")) + "٪" if bt else None
+    hit_s = fhit(bt) if bt else None
     n_s = fa(str(bt["n"])) if bt else None
 
     lines = [
@@ -769,11 +769,7 @@ cons = (buy_v - sell_v) / max(1, len(STRATEGIES))
 
 strat_options = []
 for s_ in STRATEGIES:
-    b = bts.get(s_["id"])
-    if b:
-        lbl = s_["name"] + " • دقت " + fa(format(b["hit"], ".0f")) + "٪"
-    else:
-        lbl = s_["name"]
+    lbl = s_["name"] + " • دقت " + fhit(bts.get(s_["id"]))
     strat_options.append(lbl)
 
 selected = st.selectbox(
@@ -867,7 +863,7 @@ with t1:
     m2.metric("احتمال نزول", fa(format(sig["p_down"], ".0f")) + "٪")
     m3.metric("امتیاز استراتژی", fa(format(sig["score"], "+.1f")))
     b = bts.get(strat["id"])
-    m4.metric("وین‌ریت بک‌تست", fa(format(b["hit"], ".0f")) + "٪" if b else "—")
+    m4.metric("وین‌ریت بک‌تست", fhit(b))
     f_ = fwd.get(strat["id"])
     m5, m6, m7, m8 = st.columns(4)
     m5.metric("وین‌ریت فورواردتست", fhit(f_))
@@ -952,7 +948,7 @@ with t4:
             else:
                 cur = "خنثی"
             b = bts.get(s_["id"])
-            hit = fa(format(b["hit"], ".0f")) + "٪" if b else "—"
+            hit = fhit(b)
             f_ = fwd.get(s_["id"])
             oos_hit = fhit(f_)
             oos_avg = fp(f_["avg_ret"]) if f_ and f_.get("avg_ret") is not None else "—"
