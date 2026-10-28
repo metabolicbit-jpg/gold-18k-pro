@@ -1,7 +1,9 @@
 # ========== Gold18K Pro · app_v3.py ==========
 # 📂 مسیر ریپو: app_v3.py
-# نسخهٔ ۳.۱.۰ — نمایشی و بدون ارسال. کالیبراسیون ایمن (بدون قفل شدن روی ۵۰٪)،
-# توضیح شفاف «چرا این تصمیم»، حساسیت به افق، تغییر روزانه از تاریخ، خروجی CSV.
+# نسخهٔ ۳.۲.۰ — نمایشی و بدون ارسال.
+# تازه: جهت و احتمال همیشه هم‌جهت‌اند (رفع تناقض ۵۸٪ صعودی با امتیاز منفی)،
+# عناوین «چرا این تصمیم» بر اساس نتیجه، رژیم از شیب واقعی، و افق یک‌ساعتهٔ زنده از کندل ۵ دقیقه‌ای.
+# فایل‌های همراه: collector.py (جمع‌آورِ کندل) · intraday.py (موتور افق ساعتی)
 # وابستگی: streamlit>=1.41, requests, pandas, numpy, plotly, jdatetime
 
 from __future__ import annotations
@@ -22,10 +24,15 @@ from plotly.subplots import make_subplots
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+try:
+    import intraday as intr
+except Exception:  # اگر فایل همراه در ریپو نبود، برنامه به تخمینِ روزانه برمی‌گردد
+    intr = None
+
 # ═══════════════ ۱) پیکربندی ═══════════════
 
 APP = "Gold18K Pro"
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 BUILD = "1405-08-06"
 
 LIVE_API = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/popular.json"
@@ -55,14 +62,15 @@ CFG = {
     "fallback_sigma": 0.012,
     "min_days_reliable": 60,
     "min_trades_reliable": 20,
-    "ticks_per_day": 288,   # هدفِ جمع‌آوری برای کندلِ ۵ دقیقه‌ای
+    "min_bars_ready": 864,
+    "ticks_per_day": 288,
 }
 
 STRATS = {"trend": "روند", "break": "شکست کانال", "value": "ارزش نسبی", "fx": "کانال ارزی"}
 ROLE = {"trend": "مومنتوم زمانی", "break": "شکست کانال ۲۰ روزه",
         "value": "بازگشت نسبت طلا/دلار", "fx": "سرایت نرخ دلار"}
 
-UA = {"User-Agent": "Gold18K-Pro/3.1"}
+UA = {"User-Agent": "Gold18K-Pro/3.2"}
 
 # ═══════════════ ۲) ابزار ═══════════════
 
@@ -340,7 +348,6 @@ def fetch_history(days: int = 400):
 
 
 def hist_change(history, col: str):
-    """تغییر روزانه از خودِ تاریخ — جانشین وقتی نمونهٔ محلی کافی نیست."""
     try:
         if history is None or len(history) < 2:
             return None
@@ -370,6 +377,7 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
     d["sd20"] = d["close"].rolling(20).std()
     d["sigma"] = d["ret"].ewm(span=12, adjust=False).std()
     d["slope"] = d["ema20"] / d["ema20"].shift(5) - 1
+    d["slope_z"] = rz(d["slope"], CFG["z_win"])
     d["ratio"] = d["close"] / d["usd"]
     d["ratio_z"] = rz(d["ratio"], CFG["z_win"])
     d["usd_mom"] = np.log(d["usd"]).diff(5)
@@ -378,10 +386,10 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
     d["hh"] = d["close"].rolling(20).max().shift(1)
     d["ll"] = d["close"].rolling(20).min().shift(1)
 
-    d["s_trend"] = (rz(d["slope"], CFG["z_win"]) / 2).clip(-1, 1)
+    d["s_trend"] = (d["slope_z"] / 2).clip(-1, 1)
     rng = (d["hh"] - d["ll"]).replace(0, np.nan)
     d["s_break"] = ((d["close"] - (d["hh"] + d["ll"]) / 2) / (rng / 2)).clip(-1, 1)
-    gate = 1 / (1 + np.exp(1.2 * (rz(d["slope"], CFG["z_win"]).abs() - 1.2)))
+    gate = 1 / (1 + np.exp(1.2 * (d["slope_z"].abs() - 1.2)))
     d["s_value"] = ((-d["ratio_z"] / 1.5).clip(-1, 1)) * gate
     d["s_fx"] = (rz(d["usd_mom"], CFG["z_win"]) / 2).clip(-1, 1) * d["corr"].fillna(0).clip(0, 1)
 
@@ -404,18 +412,17 @@ def build_panel(h: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fallback_prob(comp: np.ndarray) -> np.ndarray:
-    """مدل پشتیبان: امتیاز ترکیبی → احتمال. تا وقتی کالیبراسیون تجربی بالغ نشده، موتور قفل نمی‌شود."""
+    """نگاشتِ امتیاز به احتمال؛ همیشه هم‌جهت با علامتِ امتیاز."""
     return 1.0 / (1.0 + np.exp(-1.1 * (comp / 0.6)))
 
 
 def walk_probability(d: pd.DataFrame):
-    """کالیبراسیون تجربی (k نزدیک‌ترین همسایه) با شرینک؛ ترکیب با مدل پشتیبان."""
+    """کالیبراسیونِ جهتی: احتمالِ هم‌جهت با امتیاز، هرگز مخالفِ آن. با شرینکِ اندازهٔ نمونه."""
     H = CFG["horizon_days"]
     comp = np.nan_to_num(d["composite"].values, nan=0.0)
     fwd = d["fwd"].values
     n = len(comp)
-    fb = _fallback_prob(comp)
-    p = fb.copy()
+    p = _fallback_prob(comp).copy()
     used = np.zeros(n, dtype=bool)
 
     for i in range(n):
@@ -425,10 +432,10 @@ def walk_probability(d: pd.DataFrame):
             continue
         k = int(min(CFG["knn_k"], max(10, len(idx) // 6)))
         nn = idx[np.argsort(np.abs(comp[idx] - comp[i]))[:k]]
-        up = float((fwd[nn] > 0).mean())
+        hit = float((np.sign(fwd[nn]) == np.sign(comp[i])).mean())
         m = len(nn)
-        knn = (m / (m + CFG["shrink"])) * up + (CFG["shrink"] / (m + CFG["shrink"])) * 0.5
-        p[i] = 0.75 * knn + 0.25 * fb[i]
+        h = (m / (m + CFG["shrink"])) * hit + (CFG["shrink"] / (m + CFG["shrink"])) * 0.5
+        p[i] = 0.5 + np.sign(comp[i]) * (h - 0.5) * 0.9
         used[i] = True
 
     return pd.Series(np.clip(p, 0.12, 0.88), index=d.index), float(used.mean())
@@ -489,8 +496,8 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
     if ticks is not None and len(ticks) >= 40 and prem is not None:
         t = ticks.dropna(subset=["gold18", "usd", "ounce"]).copy()
         if len(t) >= 40:
-            intr = t["ounce"] * t["usd"] / OUNCE_GRAM * FINENESS_18K
-            t["prem"] = (t["gold18"] - intr) / intr * 100
+            intr_val = t["ounce"] * t["usd"] / OUNCE_GRAM * FINENESS_18K
+            t["prem"] = (t["gold18"] - intr_val) / intr_val * 100
             win = t["prem"].tail(CFG["z_win"])
             med = float(win.median())
             sd = max(float((win - med).abs().median()) * 1.4826, 0.4)
@@ -529,25 +536,28 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
 
     denom = 0.8 * sigma_d * 100 * math.sqrt(CFG["horizon_days"])
     p_req = min(0.95, 0.5 + (thr / denom) / 2) if denom > 0 else 0.5
+    conv = max(p_now, 1 - p_now)
 
     sides = {k: float(last[f"s_{k}"]) for k in STRATS}
     agree = sum(1 for v in sides.values() if v * comp > 0 and abs(v) >= 0.2)
     conf = min(CFG["max_conf"], max(50.0, 50 + abs(p_now - 0.5) * 200 * (0.55 + 0.45 * agree / len(STRATS))))
 
-    if abs(comp) < 0.15:
-        regime = "بی‌جهت"
-    elif float(last["slope"]) > 0 and comp > 0:
+    slope_z = None if pd.isna(last["slope_z"]) else float(last["slope_z"])
+    if slope_z is None:
+        regime = "نامشخص"
+    elif slope_z > 0.6:
         regime = "روند صعودی"
-    elif float(last["slope"]) < 0 and comp < 0:
+    elif slope_z < -0.6:
         regime = "روند نزولی"
     else:
         regime = "رنج"
 
     res.update(
-        ok=True, panel=d, backtest=bt, p_now=p_now, p_req=p_req, gap=(p_req - p_now), comp=comp,
-        decision=decision, edge=edge, threshold=thr, sigma_d=sigma_d,
-        conf=conf, agree=agree, sides=sides, regime=regime, calib_share=calib_share,
-        calib_on=calib_share >= 0.5,
+        ok=True, panel=d, backtest=bt, p_now=p_now, p_req=p_req, conv=conv,
+        gap=max(0.0, (p_req - conv) * 100),
+        comp=comp, decision=decision, edge=edge, edge_dir=("صعودی" if edge > 0 else "نزولی"),
+        threshold=thr, sigma_d=sigma_d, conf=conf, agree=agree, sides=sides,
+        regime=regime, slope_z=slope_z, calib_share=calib_share, calib_on=calib_share >= 0.5,
         weights={k: float(last[f"w_{k}"]) for k in STRATS},
         skills={k: (None if pd.isna(last[f"k_{k}"]) else float(last[f"k_{k}"])) for k in STRATS},
         ema20=float(last["ema20"]), ema60=float(last["ema60"]),
@@ -563,7 +573,6 @@ def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
 
 
 def horizon_table(r: dict) -> pd.DataFrame:
-    """حساسیت تصمیم به افق، با همان احتمال — برای اینکه ببینی چرا ۳ روزه انتخاب شده."""
     rows = []
     for h in (1, 2, 3, 5, 10):
         edge = (2 * r["p_now"] - 1) * 0.8 * r["sigma_d"] * 100 * math.sqrt(h)
@@ -610,7 +619,7 @@ def risk_plan(price: float, sigma_d: float, decision: str, capital: float, risk_
 # ═══════════════ ۶) متن‌های قابل کپی ═══════════════
 
 
-def signal_text(r: dict, fc: dict, plan: dict) -> str:
+def signal_text(r: dict, fc: dict, plan: dict, inta: dict | None = None) -> str:
     jd, jt = jalali()
     L = [
         "سیگنال طلای ۱۸ عیار", f"{jd} — {jt}", "",
@@ -623,11 +632,18 @@ def signal_text(r: dict, fc: dict, plan: dict) -> str:
         f"انس: {fmt(r['ounce'], 1)} دلار",
         f"پریمیوم: {pc(r['prem'])}" + (" (تخمینی)" if r.get("prem_est") else ""),
         "",
-        f"لبهٔ {CFG['horizon_days']}روزه: {r['edge']:+.2f}٪ | آستانهٔ هزینه: {r['threshold']:.2f}٪",
-        f"برای ورود لازم است احتمال ≥ {r['p_req'] * 100:.0f}٪",
+        f"لبهٔ {CFG['horizon_days']}روزه: {abs(r['edge']):.2f}٪ {r['edge_dir']} | آستانهٔ هزینه: {r['threshold']:.2f}٪",
+        f"برای ورود لازم است اطمینان ≥ {r['p_req'] * 100:.0f}٪ (اکنون {r['conv'] * 100:.0f}٪)",
         "", "پیش‌بینی (بازهٔ ۸۰٪):",
     ]
+    if inta and inta.get("ready"):
+        hb = intr.hourly_band(r["price"], inta["sigma_1h"], inta["comp"]) if intr else None
+        if hb:
+            L.append(f"• ۱ ساعت (کندل ۵ دقیقه): {fmt(hb['lo'])} تا {fmt(hb['hi'])} "
+                     f"(میانه {fmt(hb['med'])}) · جهت {inta['p_up'] * 100:.0f}٪ صعود")
     for label, q in fc.items():
+        if label == "۱ ساعت" and inta and inta.get("ready"):
+            continue
         L.append(f"• {label}: {fmt(q['lo'])} تا {fmt(q['hi'])} (میانه {fmt(q['med'])})")
     L.append("")
     if plan["side"] != 0:
@@ -639,7 +655,7 @@ def signal_text(r: dict, fc: dict, plan: dict) -> str:
     return "\n".join(L)
 
 
-def report_text(r: dict, fc: dict, plan: dict, live: dict) -> str:
+def report_text(r: dict, fc: dict, plan: dict, live: dict, inta: dict | None = None) -> str:
     jd, jt = jalali()
     bt = r["backtest"]
     L = [
@@ -651,10 +667,10 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict) -> str:
         f"پریمیوم: {pc(r['prem'])}" + (f" | z={r['prem_z']:+.2f}" if r.get("prem_z") is not None else ""),
         "──────────────", "تصمیم",
         f"سیگنال: {r['decision']}",
-        f"احتمال: {r['p_now'] * 100:.1f}٪ (آستانهٔ لازم {r['p_req'] * 100:.0f}٪)",
-        f"لبهٔ تخمینی: {r['edge']:+.2f}٪ | هزینه: {CFG['cost_pct']:.2f}٪ | آستانه: {r['threshold']:.2f}٪",
+        f"احتمال: {r['p_now'] * 100:.1f}٪ (آستانهٔ اطمینان {r['p_req'] * 100:.0f}٪)",
+        f"لبه: {abs(r['edge']):.2f}٪ {r['edge_dir']} | هزینه: {CFG['cost_pct']:.2f}٪ | آستانه: {r['threshold']:.2f}٪",
         f"رژیم: {r['regime']} | توافق: {r['agree']} از ۴",
-        f"وضعیت کالیبراسیون: {'فعال' if r['calib_on'] else 'در حال بلوغ — احتمال از مدل پشتیبان'}",
+        f"وضعیت کالیبراسیون: {'فعال' if r['calib_on'] else 'در حال بلوغ'}",
         "──────────────", "لایه‌های استراتژی",
     ]
     for k, name in STRATS.items():
@@ -662,7 +678,15 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict) -> str:
         L.append(f"{name}: امتیاز {r['sides'][k]:+.2f} | وزن {r['weights'][k] * 100:.0f}٪"
                  + (f" | مهارت اخیر {sk:+.2f}٪" if sk is not None else ""))
     L += ["──────────────", "پیش‌بینی"]
-    for label, q in fc.items():
+    if inta and inta.get("ready") and intr:
+        hb = intr.hourly_band(r["price"], inta["sigma_1h"], inta["comp"])
+        if hb:
+            L.append(f"۱ ساعت (واقعی): {fmt(hb['lo'])} — {fmt(hb['med'])} — {fmt(hb['hi'])} | نوسان {hb['sig']:.2f}٪")
+    else:
+        q = fc["۱ ساعت"]
+        L.append(f"۱ ساعت (تقریبی): {fmt(q['lo'])} — {fmt(q['med'])} — {fmt(q['hi'])}")
+    for label in ("۱ روز", "۳ روز"):
+        q = fc[label]
         L.append(f"{label}: {fmt(q['lo'])} — {fmt(q['med'])} — {fmt(q['hi'])} | نوسان {q['sig']:.2f}٪")
     L += ["──────────────", "برنامهٔ ریسک"]
     if plan["side"] != 0:
@@ -676,11 +700,13 @@ def report_text(r: dict, fc: dict, plan: dict, live: dict) -> str:
               f"نرخ برد: {bt['win']:.1f}٪",
               f"میانگین بازده هر معامله: {bt['exp']:+.2f}٪",
               f"سود انباشته: {bt['total']:+.1f}٪ | حداکثر افت: {bt['dd']:.1f}٪",
-              f"Profit Factor: {bt['pf']:.2f}" if bt["pf"] else "Profit Factor: نامشخص"]
+              f"Profit Factor: {bt['pf']:.2f}" if bt["pf"] else "Profit Factor: نامشخص",
+              f"بازده به افت: {bt['total'] / abs(bt['dd']):.2f}" if bt["dd"] else "بازده به افت: —"]
     else:
         L.append("معامله‌ای در پنجرهٔ آزمون ثبت نشد.")
     L += ["──────────────",
-          f"کیفیت داده: {r['n_days']} روز تاریخ · بروزرسانی {age_txt(live.get('at'))}",
+          f"کیفیت داده: {r['n_days']} روز تاریخ · {inta.get('n', 0) if inta else 0} کندل ۵ دقیقه‌ای · "
+          f"بروزرسانی {age_txt(live.get('at'))}",
           "این گزارش تحلیلی است و توصیهٔ سرمایه‌گذاری نیست."]
     return "\n".join(L)
 
@@ -714,8 +740,6 @@ html, body, [class*="css"], .stMarkdown, div, p, span, label, input, button, td,
 .chip-warn{ color:#fcd34d; border-color:#b45309; }
 .chip-mut{ color:#c7cede; border-color:#3a4358; }
 
-.grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
-@media (max-width:820px){ .grid{ grid-template-columns:repeat(2,1fr); } }
 .kpi{ background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:13px 14px;
   box-shadow:0 1px 2px rgba(16,24,40,.04); }
 .kpi-h{ display:flex; align-items:center; gap:7px; color:var(--muted); font-size:.74rem; margin-bottom:7px; }
@@ -758,7 +782,6 @@ div.stButton > button{ border-radius:10px; font-weight:600; padding:8px 14px; mi
   display:flex; align-items:center; justify-content:center; line-height:1.3; border:1px solid var(--line);
   background:#fff; color:var(--ink); }
 div.stButton > button:hover{ border-color:var(--gold2); color:var(--gold); }
-div.stButton > button[kind="primary"]{ background:linear-gradient(100deg,#b45309,#f59e0b); color:#fff; border:none; }
 div[data-testid="stDownloadButton"] > button{ border-radius:10px; border:1px solid var(--line);
   background:#fff; color:var(--ink); font-weight:600; padding:8px 14px; min-height:42px; }
 div[data-testid="stDownloadButton"] > button:hover{ border-color:var(--gold2); color:var(--gold); }
@@ -776,7 +799,6 @@ def icon(name: str, color: str = "#b45309") -> str:
         "scale": '<path d="M12 4v16M6 8h12M6 8l-3 6h6L6 8zm12 0l-3 6h6l-3-6z"/>',
         "check": '<path d="M5 13l4 4L19 7"/>',
         "x": '<path d="M6 6l12 12M18 6L6 18"/>',
-        "dash": '<path d="M6 12h12"/>',
         "clock": '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
         "shield": '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/>',
     }.get(name, "")
@@ -835,6 +857,9 @@ def main():
     ticks = store.ticks()
     r = build_engine(history, live, ticks)
 
+    bars = intr.load_bars() if intr else pd.DataFrame()
+    inta = intr.state(bars, r.get("comp", 0.0), r.get("sigma_d", CFG["fallback_sigma"])) if intr else {"ready": False, "n": 0}
+
     jd, jt = jalali()
     fresh = age_txt(live.get("at"))
     ok_live = r.get("price") is not None
@@ -886,8 +911,7 @@ def main():
         st.markdown(
             '<div class="notice"><span class="notice-b">کالیبراسیون تجربی هنوز بالغ نشده است.</span> '
             f'تنها {r["calib_share"] * 100:.0f}٪ از ردیف‌های تاریخی نتیجهٔ معلوم داشتند، پس احتمال از '
-            'مدل پشتیبان (نگاشت امتیاز) می‌آید؛ به همین دلیل احتمال دقیقاً ۵۰٪ دیده نمی‌شود. '
-            'با افزایش تاریخ روزانه، این عدد خودکار به کالیبراسیون تجربی می‌رسد.</div>',
+            'مدل پشتیبان می‌آید. با افزایش تاریخ، این عدد خودکار به کالیبراسیون تجربی می‌رسد.</div>',
             unsafe_allow_html=True)
 
     plan = risk_plan(r["price"], r["sigma_d"], r["decision"], capital, risk)
@@ -895,12 +919,20 @@ def main():
 
     dcls = "dec-buy" if r["decision"] == "خرید" else ("dec-sell" if "فروش" in r["decision"] else "dec-wait")
     pu = r["p_now"] * 100
-    gap_txt = ""
     if abs(r["edge"]) < r["threshold"]:
-        gap_txt = (f'ورود نیازمند احتمال ≥ <b class="num">{r["p_req"] * 100:.0f}٪</b> است؛ '
-                   f'فاصله <b class="num">{max(0, (r["p_req"] - r["p_now"]) * 100):.1f}</b> واحد.')
+        gap_txt = (f'برای ورود لازم است اطمینان ≥ <b class="num">{r["p_req"] * 100:.0f}٪</b> باشد؛ '
+                   f'اکنون <b class="num">{r["conv"] * 100:.0f}٪</b> است (فاصله <b class="num">{r["gap"]:.1f}</b> واحد).')
     else:
         gap_txt = "لبه از آستانهٔ هزینه بیشتر است."
+
+    ipill = ""
+    if inta.get("ready"):
+        d_h = "صعودی" if inta["comp"] > 0 else ("نزولی" if inta["comp"] < 0 else "بی‌جهت")
+        ipill = (f'<span class="pill">۱ ساعت: {d_h} {inta["p_up"] * 100:.0f}٪ '
+                 f'· σ {inta["sigma_1h"] * 100:.2f}٪</span>')
+    else:
+        ipill = '<span class="pill">۱ ساعت: تقریبی</span>'
+
     st.markdown(
         f"""<div class="hero">
   <div class="hero-top">
@@ -912,6 +944,7 @@ def main():
       <span class="pill">رژیم: {r['regime']}</span>
       <span class="pill">توافق {r['agree']} از ۴</span>
       <span class="pill">اطمینان {r['conf']:.0f}٪</span>
+      {ipill}
     </div>
   </div>
   <div class="meter">
@@ -923,7 +956,7 @@ def main():
     <div class="meter-legend"><span>نزول {100 - pu:.1f}٪</span><span>رشد {pu:.1f}٪</span></div>
   </div>
   <div style="margin-top:12px;font-size:.8rem;color:var(--muted);line-height:1.9;">
-    لبهٔ تخمینی <b class="num">{r['edge']:+.2f}٪</b> در برابر آستانهٔ هزینهٔ
+    لبهٔ تخمینی <b class="num">{abs(r['edge']):.2f}٪ {r['edge_dir']}</b> در برابر آستانهٔ هزینهٔ
     <b class="num">{r['threshold']:.2f}٪</b> · {gap_txt}
   </div>
 </div>""", unsafe_allow_html=True)
@@ -939,17 +972,20 @@ def main():
 
     # ═══ نمای کلی
     if page == "نمای کلی":
+        ok_dir = abs(r["comp"]) >= 0.15
+        ok_edge = abs(r["edge"]) >= r["threshold"]
+        ok_agree = r["agree"] >= 2
         left, right = st.columns([1.35, 1])
         with left:
             st.markdown('<div class="h">چرا این تصمیم؟</div>', unsafe_allow_html=True)
             st.markdown(why_block([
-                (abs(r["comp"]) >= 0.15, "جهت مشخص است",
-                 f"امتیاز ترکیبی {r['comp']:+.2f}" + ("" if abs(r["comp"]) >= 0.15 else " — زیر آستانهٔ ۰٫۱۵، یعنی بازار بی‌جهت")),
-                (abs(r["edge"]) >= r["threshold"], "لبه از هزینه بیشتر است",
-                 f"لبه {r['edge']:+.2f}٪ در برابر آستانهٔ {r['threshold']:.2f}٪"),
-                (r["agree"] >= 2, "توافق استراتژی‌ها",
+                (ok_dir, "جهت مشخص است" if ok_dir else "جهت مشخص نیست",
+                 f"امتیاز ترکیبی {r['comp']:+.2f}" + ("" if ok_dir else " — زیر آستانهٔ ۰٫۱۵، بازار بی‌جهت")),
+                (ok_edge, "لبه از هزینه بیشتر است" if ok_edge else "لبه کمتر از هزینه است",
+                 f"لبه {abs(r['edge']):.2f}٪ {r['edge_dir']} در برابر آستانهٔ {r['threshold']:.2f}٪"),
+                (ok_agree, "استراتژی‌ها هم‌جهت‌اند" if ok_agree else "استراتژی‌ها هم‌جهت نیستند",
                  f"{r['agree']} از ۴ لایه هم‌جهت‌اند"),
-                (r["calib_on"], "کالیبراسیون بالغ",
+                (r["calib_on"], "کالیبراسیون بالغ است" if r["calib_on"] else "کالیبراسیون در حال بلوغ",
                  f"{r['calib_share'] * 100:.0f}٪ ردیف‌ها نمونهٔ معتبر داشتند"),
             ]), unsafe_allow_html=True)
             st.write("")
@@ -964,6 +1000,7 @@ def main():
                     ("تعداد معامله", f"{bt['n']}"),
                     ("میانگین هر معامله", f"{bt['exp']:+.2f}٪"),
                     ("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "نامشخص"),
+                    ("حداکثر افت", f"{bt['dd']:.1f}٪"),
                 ]), unsafe_allow_html=True)
             else:
                 st.info("بک‌تست قابل اتکا هنوز شکل نگرفته است.")
@@ -1013,7 +1050,7 @@ def main():
         st.write("")
         st.markdown('<div class="h">ارزش انتظاری و حساسیت به افق</div>', unsafe_allow_html=True)
         st.dataframe(horizon_table(r), use_container_width=True, hide_index=True)
-        st.caption(f"احتمال فعلی {r['p_now'] * 100:.1f}٪ است و برای افق {CFG['horizon_days']} روزه "
+        st.caption(f"احتمال فعلی {r['p_now'] * 100:.1f}٪ و برای افق {CFG['horizon_days']} روزه "
                    f"آستانهٔ {r['threshold']:.2f}٪ لازم است. ستون تصمیم نشان می‌دهد با همان احتمال، "
                    "افق‌های دیگر چه می‌گفتند — کمکی برای انتخاب افق، نه توصیهٔ جداگانه.")
 
@@ -1033,19 +1070,49 @@ def main():
 
         st.write("")
         st.markdown('<div class="h">متن آمادهٔ سیگنال</div>', unsafe_allow_html=True)
-        st.code(signal_text(r, fc, plan), language=None)
-        st.download_button("دانلود متن سیگنال", signal_text(r, fc, plan),
+        st.code(signal_text(r, fc, plan, inta), language=None)
+        st.download_button("دانلود متن سیگنال", signal_text(r, fc, plan, inta),
                            file_name=f"signal_{datetime.now():%Y%m%d_%H%M}.txt", mime="text/plain")
 
     # ═══ پیش‌بینی
     elif page == "پیش‌بینی":
         st.markdown('<div class="h">بازهٔ ۸۰٪ برای هر افق</div>', unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame([{
-            "افق": label, "کمینه": fmt(q["lo"]), "میانه": fmt(q["med"]),
-            "بیشینه": fmt(q["hi"]), "حرکت میانه": pc(q["move"]), "نوسان دوره": f"{q['sig']:.2f}٪",
-        } for label, q in fc.items()]), use_container_width=True, hide_index=True)
-        st.caption("توزیع لگ‌نرمال با نوسان تحقق‌یافته و رانش محافظه‌کارانه؛ عدد قطعی نیست. "
-                   "افق ساعتی از σ روزانه بر √۲۴ ساخته می‌شود و تا جمع شدن نمونهٔ درون‌روزی تقریبی است.")
+        table = []
+        if inta.get("ready") and intr:
+            hb = intr.hourly_band(r["price"], inta["sigma_1h"], inta["comp"])
+            table.append({"افق": "۱ ساعت (واقعی)", "کمینه": fmt(hb["lo"]), "میانه": fmt(hb["med"]),
+                          "بیشینه": fmt(hb["hi"]), "حرکت میانه": pc(hb["move"]),
+                          "نوسان دوره": f"{hb['sig']:.2f}٪"})
+        else:
+            q = fc["۱ ساعت"]
+            table.append({"افق": "۱ ساعت (تقریبی)", "کمینه": fmt(q["lo"]), "میانه": fmt(q["med"]),
+                          "بیشینه": fmt(q["hi"]), "حرکت میانه": pc(q["move"]),
+                          "نوسان دوره": f"{q['sig']:.2f}٪"})
+        for label in ("۱ روز", "۳ روز"):
+            q = fc[label]
+            table.append({"افق": label, "کمینه": fmt(q["lo"]), "میانه": fmt(q["med"]),
+                          "بیشینه": fmt(q["hi"]), "حرکت میانه": pc(q["move"]),
+                          "نوسان دوره": f"{q['sig']:.2f}٪"})
+        st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+        if inta.get("ready"):
+            st.caption("افق یک‌ساعته از کندل‌های ۵ دقیقه‌ای خودمان محاسبه شده؛ افق‌های روزانه از تاریخ روزانه.")
+        else:
+            st.caption(f"افق یک‌ساعته هنوز تقریبی است: {inta.get('n', 0)} کندل ۵ دقیقه‌ای داریم و "
+                       f"{CFG['min_bars_ready']} لازم است. افق روزانه از تاریخ روزانه می‌آید و مستقل است.")
+
+        if inta.get("ready"):
+            st.write("")
+            st.markdown('<div class="h">تصویر درون‌روزی</div>', unsafe_allow_html=True)
+            st.markdown(rows([
+                ("نوسان ۵ دقیقه", f"{inta['sigma_5m'] * 100:.3f}٪"),
+                ("نوسان ۱ ساعت", f"{inta['sigma_1h'] * 100:.2f}٪"),
+                ("مومنتوم ۱ ساعت (z)", f"{inta['mom_z']:+.2f}"),
+                ("انحراف از میانگین (z)", f"{inta['dev_z']:+.2f}"),
+                ("امتیاز درون‌روزی", f"{inta['comp']:+.2f}"),
+                ("نرخ برد جهتی (تاریخی)", "—" if inta["hit"] is None else f"{inta['hit'] * 100:.0f}٪"),
+            ]), unsafe_allow_html=True)
+            st.caption(f"{inta['n']} کندل ۵ دقیقه‌ای · آخرین کندل {inta['last']}")
+
         st.write("")
         p = r["panel"]
         cur = r["price"]
@@ -1074,12 +1141,13 @@ def main():
             st.info("در پنجرهٔ فعلی شرط ورود (لبه بیش از هزینه) فعال نشده؛ کارنامه خالی است. "
                     "این یعنی موتور سکوت کرده، نه اینکه خراب است.")
         else:
-            c = st.columns(5)
+            c = st.columns(6)
             c[0].metric("نرخ برد", f"{bt['win']:.1f}٪" if bt["reliable"] else "نمونهٔ کم")
             c[1].metric("معاملات", f"{bt['n']}")
             c[2].metric("میانگین هر معامله", f"{bt['exp']:+.2f}٪")
             c[3].metric("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "نامشخص")
             c[4].metric("حداکثر افت", f"{bt['dd']:.1f}٪")
+            c[5].metric("بازده به افت", f"{bt['total'] / abs(bt['dd']):.2f}" if bt["dd"] else "—")
             st.caption(f"نمایش موتور (درصد روزهایی که پوزیشن داشت): {bt['exposure']:.0f}٪ · "
                        + ("نمونه برای قضاوت کافی است." if bt["reliable"]
                           else f"کمتر از {CFG['min_trades_reliable']} معامله؛ عدد نرخ برد شکننده است."))
@@ -1101,7 +1169,7 @@ def main():
             cal["برد"] = (cal["برد"] * 100).round(1)
             st.dataframe(cal.rename(columns={"احتمال": "احتمال میانگین (٪)", "برد": "نرخ برد واقعی (٪)"}),
                          use_container_width=True)
-            st.caption("هر چه ستون آخر به ستون قبل نزدیک‌تر باشد، احتمال‌ها صادق‌ترند. اختلاف زیاد یعنی نمونه کم است.")
+            st.caption("هر چه ستون آخر به ستون قبل نزدیک‌تر باشد، احتمال‌ها صادق‌ترند.")
 
             st.markdown('<div class="h">معاملات</div>', unsafe_allow_html=True)
             show = bt["trades"].tail(20).iloc[::-1].copy()
@@ -1136,21 +1204,24 @@ def main():
         st.write("")
         st.markdown('<div class="h">آمادگی داده</div>', unsafe_allow_html=True)
         days_ok = r["n_days"] >= CFG["min_days_reliable"]
-        tick_goal = CFG["ticks_per_day"]
+        nb = int(inta.get("n", 0))
         st.markdown(why_block([
             (days_ok, f"تاریخ روزانه: {r['n_days']} روز",
              "کافی برای سیگنال روزانه" if days_ok else f"حداقل {CFG['min_days_reliable']} روز لازم است"),
             (len(ticks) >= 40, f"نمونهٔ محلی: {len(ticks)}",
              "برای z پریمیوم و تغییر لحظه‌ای استفاده می‌شود"),
-            (len(ticks) >= tick_goal, f"مسیر کندل ۵ دقیقه‌ای: {len(ticks)} از {tick_goal}",
-             "با این تعداد نمونه در یک روز، افق یک‌ساعته واقعی می‌شود"),
+            (nb >= CFG["min_bars_ready"], f"کندل ۵ دقیقه‌ای: {nb} از {CFG['min_bars_ready']}",
+             "با رسیدن به این حد، افق یک‌ساعته واقعی می‌شود" if nb < CFG["min_bars_ready"]
+             else "افق یک‌ساعته از دادهٔ واقعی محاسبه می‌شود"),
+            (intr is not None, "موتور درون‌روزی متصل است" if intr is not None else "intraday.py پیدا نشد",
+             "فایل همراه در کنار app_v3.py باشد" if intr is None else "آماده"),
         ]), unsafe_allow_html=True)
-        st.caption("نمونه‌های محلی فقط وقتی اضافه می‌شوند که صفحه باز باشد و داده تازه باشد؛ "
-                   "برای جمع‌آوری پیوسته، اپ باید روی سروری با اجرای مستمر بماند.")
+        st.caption("برای جمع‌آوری پیوسته، collector.py باید روی سروری با اجرای مستمر بماند؛ "
+                   "باز بودن صفحه کافی نیست.")
 
         st.write("")
         st.markdown('<div class="h">گزارش کامل</div>', unsafe_allow_html=True)
-        txt = report_text(r, fc, plan, live)
+        txt = report_text(r, fc, plan, live, inta)
         st.code(txt, language=None)
         st.download_button("دانلود گزارش کامل", txt,
                            file_name=f"report_{datetime.now():%Y%m%d_%H%M}.txt", mime="text/plain")
