@@ -1,816 +1,1107 @@
-import streamlit as st
-import requests
-import pandas as pd
+# ========== Gold18K Pro · app_v3.py ==========
+# 📂 مسیر ریپو: app_v3.py
+# نسخهٔ ۳.۰.۰ — نسخهٔ نمایشی و بدون ارسال: هیچ اتصالی به بله یا هر پیام‌رسان ندارد.
+# موتور: چهار استراتژی معتبر با وزن‌دهی عملکردی، کالیبراسیون تجربی، دروازهٔ هزینه، بک‌تست گام‌به‌گام.
+# وابستگی: streamlit>=1.41, requests, pandas, numpy, plotly, jdatetime
+
+from __future__ import annotations
+
+import math
+import os
+import re
+import sqlite3
+from contextlib import closing
+from datetime import datetime, timezone
+
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
+import requests
+import streamlit as st
 from plotly.subplots import make_subplots
-from datetime import datetime
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-st.set_page_config(
-    page_title="Gold18K Intelligence",
-    page_icon="🥇",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+# ═══════════════ ۱) پیکربندی ═══════════════
 
-# ====================== استایل (مینیمال فلت) ======================
-st.markdown("""
-<style>
-@import url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css');
+APP = "Gold18K Pro"
+VERSION = "3.0.0"
+BUILD = "1405-08-06"
 
-html, body, [class*="css"], .stMarkdown, div, p, span, label {
-    font-family: Vazirmatn, Tahoma, sans-serif !important;
-}
-.stApp { background-color: #0d1117 !important; }
-.block-container { padding-top: 1.2rem; max-width: 1060px; }
-
-.card {
-    background: #161b22 !important;
-    border: 1px solid #262c36 !important;
-    border-radius: 14px;
-    padding: 1rem 0.75rem;
-    text-align: center;
-}
-.card-label { color: #8b949e !important; font-size: 0.82rem !important; margin-bottom: 0.4rem; }
-.card-value { font-size: 1.3rem !important; font-weight: 700 !important; color: #f0f3f6 !important; }
-.pos { color: #3fb950 !important; }
-.neg { color: #f85149 !important; }
-
-[data-testid="stMetricValue"] { color: #f0f3f6 !important; font-size: 1.2rem !important; font-weight: 700 !important; }
-[data-testid="stMetricLabel"] { color: #8b949e !important; font-size: 0.85rem !important; }
-[data-testid="stMetricDelta"] { font-weight: 600 !important; }
-
-.stCaption, [data-testid="stCaptionContainer"] { color: #8b949e !important; font-size: 0.85rem !important; }
-
-div.stButton > button, div.stDownloadButton > button {
-    background: #161b22 !important;
-    color: #f0f3f6 !important;
-    font-weight: 600 !important;
-    font-size: 0.95rem !important;
-    border: 1px solid #30363d !important;
-    border-radius: 10px !important;
-    padding: 0.6rem 1rem !important;
-}
-div.stButton > button:hover, div.stDownloadButton > button:hover {
-    background: #1c2129 !important;
-    border-color: #e3b341 !important;
-    color: #e3b341 !important;
-}
-
-.stTabs [data-baseweb="tab"] {
-    background: transparent !important;
-    border: none !important;
-    border-bottom: 2px solid transparent !important;
-    border-radius: 0 !important;
-    color: #8b949e !important;
-    padding: 0.5rem 1rem !important;
-    font-weight: 600 !important;
-}
-.stTabs [aria-selected="true"] {
-    color: #e3b341 !important;
-    border-bottom: 2px solid #e3b341 !important;
-}
-
-.signal-box {
-    border-radius: 14px;
-    padding: 1.1rem;
-    text-align: center;
-    font-size: 1.25rem;
-    font-weight: 800;
-    margin: 0.4rem 0 0.8rem 0;
-}
-.buy    { background: rgba(63,185,80,0.10);  color: #3fb950; border: 1px solid rgba(63,185,80,0.45); }
-.sell   { background: rgba(248,81,73,0.10);  color: #f85149; border: 1px solid rgba(248,81,73,0.45); }
-.neutral{ background: rgba(110,118,129,0.10); color: #adbac7; border: 1px solid rgba(110,118,129,0.40); }
-
-.factor {
-    display: flex; justify-content: space-between; align-items: center;
-    background: #161b22; border: 1px solid #262c36; border-radius: 10px;
-    padding: 0.55rem 0.85rem; margin-bottom: 0.4rem;
-}
-.factor-name { color: #f0f3f6; font-size: 0.92rem; font-weight: 600; }
-.chip {
-    font-size: 0.8rem; font-weight: 700; border-radius: 8px;
-    padding: 0.15rem 0.55rem;
-}
-.chip.pos { background: rgba(63,185,80,0.12);  color: #3fb950; }
-.chip.neg { background: rgba(248,81,73,0.12);  color: #f85149; }
-.factor-desc { color: #8b949e; font-size: 0.8rem; margin-top: 0.15rem; }
-
-table.ind { width: 100%; border-collapse: collapse; }
-table.ind td, table.ind th {
-    padding: 0.5rem 0.7rem; text-align: right;
-    border-bottom: 1px solid #21262d; font-size: 0.9rem;
-}
-table.ind th { color: #8b949e; font-weight: 600; }
-table.ind td.v { color: #f0f3f6; font-weight: 700; direction: ltr; text-align: left; }
-
-.section { font-size: 1.02rem; font-weight: 700; color: #f0f3f6 !important; margin: 1.2rem 0 0.5rem 0; }
-.stAlert { opacity: 1 !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ====================== منابع ======================
 LIVE_API = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/popular.json"
 HISTORY_USD = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/history/USD_IRR_FREE.json"
 HISTORY_GOLD18 = "https://raw.githubusercontent.com/iran-market/iran-market.github.io/main/data/history/GOLD_18K_IRR.json"
 METAL_API = "https://api.gold-api.com/price/{}"
-XAU_HISTORY = "https://stooq.com/q/d/l/?s=xauusd&i=d"
+
+OUNCE_GRAM = 31.1034768
+FINENESS_18K = 0.750
+
+CFG = {
+    "horizon_days": 3,
+    "cost_pct": 0.45,
+    "cost_mult": 1.15,
+    "risk_pct": 1.0,
+    "stop_sigma": 1.5,
+    "target_sigma": 2.5,
+    "z_win": 60,
+    "ew_span": 40,
+    "knn_k": 40,
+    "shrink": 15,
+    "z80": 1.2816,
+    "max_conf": 84.0,
+    "prem_mean_default": 1.5,
+    "prem_sd_default": 2.8,
+    "fallback_sigma": 0.012,
+}
+
+STRATS = {"trend": "روند", "break": "شکست کانال", "value": "ارزش نسبی", "fx": "کانال ارزی"}
+
+UA = {"User-Agent": "Gold18K-Pro/3.0"}
+
+# ═══════════════ ۲) ابزار ═══════════════
 
 
-def _get(url, timeout=10, retries=2):
-    """دریافت با تلاش مجدد؛ در خطا None برمی‌گرداند."""
-    for _ in range(retries):
-        try:
-            r = requests.get(url, timeout=timeout)
-            if r.status_code == 200:
-                return r
-        except Exception:
-            pass
-    return None
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def to_jalali(dt=None):
-    if dt is None:
-        dt = datetime.now()
+def jalali(dt: datetime | None = None):
+    dt = dt or datetime.now()
     try:
         import jdatetime
+
         j = jdatetime.datetime.fromgregorian(datetime=dt)
         return j.strftime("%Y/%m/%d"), j.strftime("%H:%M")
     except Exception:
-        g_y, g_m, g_d = dt.year, dt.month, dt.day
-        gy2 = g_y - 1600
-        days = 365 * gy2 + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400
-        md = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-        days += md[g_m - 1] + g_d - 1
-        if g_m > 2 and ((g_y % 4 == 0 and g_y % 100 != 0) or g_y % 400 == 0):
-            days += 1
-        j_days = days - 79
-        j_np = j_days // 12053
-        j_days %= 12053
-        j_y = 979 + 33 * j_np + 4 * (j_days // 1461)
-        j_days %= 1461
-        if j_days >= 366:
-            j_y += (j_days - 1) // 365
-            j_days = (j_days - 1) % 365
-        if j_days < 186:
-            j_m = 1 + j_days // 31
-            j_d = 1 + j_days % 31
-        else:
-            j_m = 7 + (j_days - 186) // 30
-            j_d = 1 + (j_days - 186) % 30
-        return f"{j_y:04d}/{j_m:02d}/{j_d:02d}", dt.strftime("%H:%M")
+        return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
 
 
-def jalali_to_greg(s):
+def safe_float(v, default=None):
     try:
-        import jdatetime
-        y, m, d = [int(x) for x in str(s).strip().split("/")]
-        return jdatetime.date(y, m, d).togregorian().isoformat()
+        if v is None:
+            return default
+        f = float(str(v).replace(",", "").strip())
+        return default if (math.isnan(f) or math.isinf(f)) else f
     except Exception:
-        return None
+        return default
 
 
-# ====================== داده ======================
-@st.cache_data(ttl=40, show_spinner=False)
-def fetch_live():
-    out = {
-        "usd": None, "gold18": None,
-        "ounce": None, "silver": None, "copper": None,
-        "ts": datetime.now().strftime("%H:%M")
-    }
-    r = _get(LIVE_API, timeout=9)
-    if r is not None:
-        try:
-            for it in r.json().get("data", []):
-                s = it.get("symbol", "")
-                if s == "USD_IRR_FREE":
-                    out["usd"] = {"price": float(it.get("price", 0)), "chg": it.get("change_pct")}
-                elif s == "GOLD_18K_IRR":
-                    out["gold18"] = {"price": float(it.get("price", 0)), "chg": it.get("change_pct")}
-        except Exception:
-            pass
+def fmt(v, d: int = 0) -> str:
+    try:
+        return "—" if v is None else f"{v:,.{d}f}"
+    except Exception:
+        return "—"
 
-    for key, sym in [("ounce", "XAU"), ("silver", "XAG"), ("copper", "HG")]:
-        r = _get(METAL_API.format(sym), timeout=7)
-        if r is not None:
+
+def pc(v, d: int = 2) -> str:
+    return "—" if v is None else f"{v:+.{d}f}٪"
+
+
+def scr(msg) -> str:
+    s = re.sub(r"https?://[^\s'\"]+", "<آدرس پنهان>", str(msg))
+    return s[:240]
+
+
+def age_txt(iso: str | None) -> str:
+    if not iso:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        s = (now_utc() - dt).total_seconds()
+        return "همین حالا" if s < 0 else (f"{s:.0f} ثانیه پیش" if s < 90 else f"{s / 60:.0f} دقیقه پیش")
+    except Exception:
+        return "—"
+
+
+def _digits(s: str) -> str:
+    return str(s).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+
+
+def _dt(v):
+    if v is None:
+        return pd.NaT
+    s = _digits(v).strip()
+    if not s:
+        return pd.NaT
+    m = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)
+    if m:
+        y, mo, dd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hh = mm = 0
+        tm = re.search(r"(\d{1,2}):(\d{2})", s[m.end():])
+        if tm:
+            hh, mm = int(tm.group(1)), int(tm.group(2))
+        if 1300 <= y <= 1500:
             try:
-                out[key] = {"price": float(r.json().get("price", 0))}
+                import jdatetime
+
+                g = jdatetime.date(y, mo, dd).togregorian()
+                return pd.Timestamp(g.year, g.month, g.day, hh, mm)
             except Exception:
-                pass
-    return out
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_base_history(days=90):
+                return pd.NaT
+        try:
+            return pd.Timestamp(y, mo, dd, hh, mm)
+        except Exception:
+            return pd.NaT
     try:
-        u = pd.DataFrame(_get(HISTORY_USD, timeout=11).json().get("data", []))
-        g = pd.DataFrame(_get(HISTORY_GOLD18, timeout=11).json().get("data", []))
-        if u.empty or g.empty:
-            return None
-        for df in [u, g]:
-            if "date_jalali" in df.columns:
-                df["date"] = df["date_jalali"]
-            df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        df = pd.merge(
-            u[["date", "close"]].rename(columns={"close": "usd"}),
-            g[["date", "close"]].rename(columns={"close": "gold18"}),
-            on="date", how="inner"
-        ).dropna().tail(days).reset_index(drop=True)
-        return df
+        return pd.Timestamp(s)
     except Exception:
-        return None
+        return pd.NaT
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_ounce_history(days=150):
-    """سری تاریخی انس طلا (XAU/USD) از استوق برای محاسبه‌ی پریمیوم تاریخی."""
-    try:
-        r = _get(XAU_HISTORY, timeout=12)
-        if r is None:
-            return None
-        import io
-        df = pd.read_csv(io.StringIO(r.text))
-        if "Close" not in df.columns or "Date" not in df.columns:
-            return None
-        df = df[["Date", "Close"]].rename(columns={"Date": "date_g", "Close": "ounce"})
-        df["date_g"] = df["date_g"].astype(str)
-        df["ounce"] = pd.to_numeric(df["ounce"], errors="coerce")
-        df = df.dropna().tail(days)
-        return df.reset_index(drop=True)
-    except Exception:
-        return None
-
-
-def theoretical(ounce, usd):
-    if not ounce or not usd:
-        return None
-    return (ounce * usd / 31.1035) * 0.75
-
-
-def build_dataset():
-    base = fetch_base_history()
-    if base is None:
-        return None
-    feat = base.copy()
-    feat["date_g"] = feat["date"].apply(jalali_to_greg)
-
-    oh = fetch_ounce_history()
-    has_ounce = False
-    if oh is not None and feat["date_g"].notna().sum() > 20:
-        feat = feat.merge(oh, on="date_g", how="left")
-        feat["usd"] = pd.to_numeric(feat["usd"], errors="coerce")
-        theo_hist = feat["ounce"] * feat["usd"] / 31.1035 * 0.75
-        feat["prem"] = feat["gold18"] - theo_hist
-        if feat["prem"].notna().sum() >= 30:
-            has_ounce = True
-        else:
-            feat["prem"] = np.nan
-    else:
-        feat["prem"] = np.nan
-
-    # --- اندیکاتورها ---
-    feat["ret"] = feat["gold18"].pct_change()
-    feat["ema20"] = feat["gold18"].ewm(span=20, adjust=False).mean()
-    feat["ema50"] = feat["gold18"].ewm(span=50, adjust=False).mean()
-
-    delta = feat["gold18"].diff()
-    up = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
-    dn = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
-    rs = up / dn.replace(0, np.nan)
-    feat["rsi"] = 100 - 100 / (1 + rs)
-
-    ema12 = feat["gold18"].ewm(span=12, adjust=False).mean()
-    ema26 = feat["gold18"].ewm(span=26, adjust=False).mean()
-    feat["macd"] = ema12 - ema26
-    feat["macd_sig"] = feat["macd"].ewm(span=9, adjust=False).mean()
-    feat["macd_hist"] = feat["macd"] - feat["macd_sig"]
-
-    ma20 = feat["gold18"].rolling(20).mean()
-    sd20 = feat["gold18"].rolling(20).std()
-    feat["bb_pos"] = (feat["gold18"] - ma20) / (2 * sd20.replace(0, np.nan))
-
-    feat["atr"] = feat["ret"].abs().rolling(14).mean()
-    feat["vol10"] = feat["ret"].rolling(10).std() * 100
-    feat["mom3"] = feat["gold18"].pct_change(3) * 100
-    feat["mom5"] = feat["gold18"].pct_change(5) * 100
-    feat["mom10"] = feat["gold18"].pct_change(10) * 100
-    feat["usd_mom5"] = feat["usd"].pct_change(5) * 100
-    feat["corr"] = feat["ret"].rolling(20).corr(feat["usd"].pct_change())
-
-    feat["has_ounce"] = has_ounce
-    return feat
-
-
-# ====================== موتور تحلیل ======================
-def get_prem_z(feat, prem_now):
-    """Z-Score واقعی پریمیوم از سری تاریخی؛ در نبود داده، تقریب ثابت."""
-    if prem_now is None:
-        return None
-    try:
-        if feat is not None and "prem" in feat.columns and feat["prem"].notna().sum() >= 35:
-            s = feat["prem"].dropna()
-            mean = s.tail(40).mean()
-            std = s.tail(40).std()
-            if std and not np.isnan(std) and std > 1:
-                return (prem_now - mean) / std
-    except Exception:
-        pass
-    return prem_now / 2.8
-
-
-def intelligence_engine(live, feat):
-    gold = live.get("gold18") or {}
-    usd = live.get("usd") or {}
-    ounce = live.get("ounce") or {}
-
-    g_price = gold.get("price")
-    o_price = ounce.get("price")
-    u_price = usd.get("price")
-
-    theo = theoretical(o_price, u_price)
-    prem = ((g_price - theo) / theo * 100) if (theo and g_price) else None
-    z_prem = get_prem_z(feat, prem)
-
-    row = feat.iloc[-1] if feat is not None else None
-    ok = row is not None and len(feat) > 25 and row["rsi"] is not None and not np.isnan(row["rsi"])
-
-    score = 0.0
-    factors = []
-    max_score = 10.5
-
-    # 1) روند (EMA20/50)
-    if ok:
-        e20, e50, px = row["ema20"], row["ema50"], row["gold18"]
-        if e20 > e50 and px > e20:
-            score += 2
-            factors.append(("روند صعودی تاییدشده", +2, "قیمت بالای EMA20 و EMA20 بالای EMA50"))
-        elif e20 > e50:
-            score += 1
-            factors.append(("روند صعودی ملایم", +1, "میانگین‌ها صعودی اما قیمت زیر EMA20"))
-        elif e20 < e50 and px < e20:
-            score -= 2
-            factors.append(("روند نزولی تاییدشده", -2, "قیمت زیر EMA20 و EMA20 زیر EMA50"))
-        else:
-            score -= 1
-            factors.append(("روند نزولی ملایم", -1, "میانگین‌ها نزولی اما قیمت بالای EMA20"))
-
-        # 2) RSI
-        rsi = row["rsi"]
-        if rsi <= 32:
-            score += 1.5
-            factors.append(("RSI اشباع فروش", +1.5, f"RSI={rsi:.0f} → پتانسیل برگشت صعودی"))
-        elif rsi >= 68:
-            score -= 1.5
-            factors.append(("RSI اشباع خرید", -1.5, f"RSI={rsi:.0f} → ریسک اصلاح"))
-        else:
-            factors.append(("RSI خنثی", 0, f"RSI={rsi:.0f}"))
-
-        # 3) MACD
-        hist, hist_prev = row["macd_hist"], feat["macd_hist"].iloc[-2]
-        if hist > 0:
-            sc = 1.5 if (not np.isnan(hist_prev) and hist > hist_prev) else 0.8
-            score += sc
-            factors.append(("MACD مثبت", +sc, "هیستوگرام بالای صفر → مومنتوم صعودی"))
-        else:
-            sc = 1.5 if (not np.isnan(hist_prev) and hist < hist_prev) else 0.8
-            score -= sc
-            factors.append(("MACD منفی", -sc, "هیستوگرام زیر صفر → مومنتوم نزولی"))
-
-        # 4) موقعیت بولینگر
-        bb = row["bb_pos"]
-        if bb is not None and not np.isnan(bb):
-            if bb <= -0.9:
-                score += 1
-                factors.append(("پایین بولینگر", +1, f"فاصله معنادار زیر میانگین ({bb:.1f}σ)"))
-            elif bb >= 0.9:
-                score -= 1
-                factors.append(("بالای بولینگر", -1, f"فاصله معنادار بالای میانگین ({bb:.1f}σ)"))
-
-    # 5) پریمیوم و Z-Score
-    if z_prem is not None:
-        if z_prem <= -1.5:
-            score += 2
-            factors.append(("پریمیوم بسیار منفی", +2, f"Z={z_prem:.2f} → ارزش نسبی جذاب"))
-        elif z_prem <= -0.7:
-            score += 1
-            factors.append(("پریمیوم منفی", +1, f"Z={z_prem:.2f}"))
-        elif z_prem >= 1.5:
-            score -= 2
-            factors.append(("پریمیوم بسیار بالا", -2, f"Z={z_prem:.2f} → گران نسبت به جهانی"))
-        elif z_prem >= 0.7:
-            score -= 1
-            factors.append(("پریمیوم بالا", -1, f"Z={z_prem:.2f}"))
-
-    # 6) مومنتوم
-    if ok:
-        m3, m5 = row["mom3"], row["mom5"]
-        if m3 > 1.5 and m5 > 2.5:
-            score += 1.5
-            factors.append(("مومنتوم صعودی", +1.5, f"۳روزه {m3:+.1f}% | ۵روزه {m5:+.1f}%"))
-        elif m3 < -1.5 and m5 < -2.5:
-            score -= 1.5
-            factors.append(("مومنتوم نزولی", -1.5, f"۳روزه {m3:+.1f}% | ۵روزه {m5:+.1f}%"))
-
-        # 7) دلار با وزن همبستگی
-        corr = row["corr"]
-        um5 = row["usd_mom5"]
-        if corr is not None and not np.isnan(corr) and corr > 0.6:
-            if um5 > 1.5:
-                score += 1
-                factors.append(("حمایت دلار", +1, f"دلار ۵روزه {um5:+.1f}% با همبستگی {corr:.2f}"))
-            elif um5 < -1.5:
-                score -= 1
-                factors.append(("فشار دلار", -1, f"دلار ۵روزه {um5:+.1f}% با همبستگی {corr:.2f}"))
-
-    # جریمه‌ی نوسان
-    vol = row["vol10"] if ok else None
-    penalty = 1.0
-    if vol is not None and not np.isnan(vol):
-        if vol > 3.0:
-            penalty = 0.70
-            factors.append(("نوسان بسیار بالا", 0, f"نوسان {vol:.1f}% → کاهش وزن سیگنال"))
-        elif vol > 2.2:
-            penalty = 0.85
-            factors.append(("نوسان بالا", 0, f"نوسان {vol:.1f}% → احتیاط"))
-    score *= penalty
-
-    norm = score / max_score
-    if norm >= 0.5:
-        regime, signal = "صعودی قوی", "خرید قوی"
-    elif norm >= 0.2:
-        regime, signal = "صعودی ملایم", "خرید محتاطانه"
-    elif norm <= -0.5:
-        regime, signal = "نزولی قوی", "فروش / کاهش"
-    elif norm <= -0.2:
-        regime, signal = "نزولی ملایم", "فروش محتاطانه"
-    else:
-        regime, signal = "رنج / نامشخص", "خنثی / نظاره‌گر"
-
-    conf = min(92, 52 + abs(norm) * 40)
-    if penalty < 1:
-        conf *= 0.9
-    conf = max(40, conf)
-
-    p_up = max(12, min(88, 50 + norm * 32))
-    p_down = 100 - p_up
-
-    # --- پیش‌بینی ---
-    pred = None
-    if ok and g_price:
-        rets = feat["ret"].dropna()
-        short = rets.tail(3).mean()
-        med = rets.tail(8).mean()
-        usd_s = feat["usd"].pct_change().dropna().tail(3).mean()
-        corr_safe = row["corr"]
-        if corr_safe is None or np.isnan(corr_safe):
-            corr_safe = 0.55
-        z_term = -0.20 * (z_prem / 100) if z_prem is not None else 0
-
-        if abs(norm) >= 0.45:
-            w = (0.34, 0.20, 0.28, 0.18)
-        elif abs(norm) >= 0.2:
-            w = (0.30, 0.24, 0.28, 0.18)
-        else:
-            w = (0.26, 0.26, 0.26, 0.22)
-        expected = (w[0] * short + w[1] * med + w[2] * (usd_s * corr_safe) + w[3] * z_term)
-
-        daily_vol = rets.tail(10).std()
-        if daily_vol is None or np.isnan(daily_vol):
-            daily_vol = 0.012
-
-        d1 = g_price * (1 + expected * 0.90)
-        d3 = g_price * (1 + expected * 2.15)
-        pred = {
-            "d1": d1,
-            "d1_low": d1 * (1 - daily_vol * 1.05),
-            "d1_high": d1 * (1 + daily_vol * 1.05),
-            "d3": d3,
-            "d3_low": d3 * (1 - daily_vol * 1.7),
-            "d3_high": d3 * (1 + daily_vol * 1.7),
-            "expected_daily": expected * 100,
-        }
-
-    # --- سطوح معامله ---
-    levels = None
-    if g_price and ok:
-        atr = row["atr"]
-        if atr is None or np.isnan(atr):
-            atr = 0.012
-        atr_toman = atr * g_price
-        if signal.startswith("خرید"):
-            levels = {"entry": g_price, "sl": g_price - 1.6 * atr_toman,
-                      "tp": g_price + 2.6 * atr_toman, "atr": atr_toman}
-        elif signal.startswith("فروش"):
-            levels = {"entry": g_price, "sl": g_price + 1.6 * atr_toman,
-                      "tp": g_price - 2.6 * atr_toman, "atr": atr_toman}
-        else:
-            levels = {"entry": g_price, "sl": None, "tp": None,
-                      "atr": atr_toman}
-
-    return {
-        "theo": theo, "prem": prem, "z_prem": z_prem,
-        "score": score, "norm": norm, "factors": factors,
-        "regime": regime, "signal": signal, "confidence": conf,
-        "p_up": p_up, "p_down": p_down,
-        "pred": pred, "levels": levels,
-        "row": row if ok else None,
-    }
-
-
-def quick_backtest(feat):
-    """بک‌تست سبک: اعمال امتیاز ساده در هر روز تاریخی و سنجش دقت جهت روز بعد."""
-    try:
-        d = feat.dropna(subset=["rsi", "macd_hist", "bb_pos", "ema20", "ema50"]).reset_index(drop=True)
-        if len(d) < 40:
-            return None
-        hits = sigs = 0
-        for i in range(len(d) - 1):
-            r = d.iloc[i]
-            s = 0.0
-            s += 1 if r["ema20"] > r["ema50"] else -1
-            s += 1 if r["macd_hist"] > 0 else -1
-            if r["mom5"] > 1.0:
-                s += 0.8
-            elif r["mom5"] < -1.0:
-                s -= 0.8
-            if r["bb_pos"] <= -0.9:
-                s += 0.6
-            elif r["bb_pos"] >= 0.9:
-                s -= 0.6
-            if r["rsi"] <= 32:
-                s += 0.6
-            elif r["rsi"] >= 68:
-                s -= 0.6
-            if abs(s) >= 1.6:
-                sigs += 1
-                if np.sign(d.iloc[i + 1]["ret"]) == np.sign(s):
-                    hits += 1
-        if sigs >= 5:
-            return {"n": sigs, "hit": hits / sigs * 100}
-    except Exception:
-        pass
+def _pick(df, cands):
+    low = {str(c).lower(): c for c in df.columns}
+    for c in cands:
+        if c in low:
+            return low[c]
     return None
 
 
-def build_market_report(live, intel):
-    j_date, j_time = to_jalali()
-    usd = live.get("usd") or {}
-    gold = live.get("gold18") or {}
-    ounce = live.get("ounce") or {}
-    usd_p = usd.get("price") or 0
-    g18 = gold.get("price") or 0
-    xau = ounce.get("price")
+# ═══════════════ ۳) انبار سبک (فقط نمونهٔ محلی) ═══════════════
 
-    factors_txt = ""
-    if intel.get("factors"):
-        for name, sc, desc in intel["factors"][:5]:
-            arrow = "▲" if sc > 0 else ("▼" if sc < 0 else "•")
-            factors_txt += f"\n{arrow} {name}: {desc}"
+
+class Store:
+    def __init__(self, path: str | None = None):
+        self.path = self._resolve(path or os.getenv("GOLD18K_DB", "data/gold18k.db"))
+        try:
+            with closing(sqlite3.connect(self.path)) as c:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS ticks(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    " ts TEXT, usd REAL, gold18 REAL, ounce REAL, silver REAL, copper REAL)"
+                )
+                c.commit()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _resolve(p: str) -> str:
+        for cand in (p, "/tmp/gold18k_pro.db", ":memory:"):
+            try:
+                if cand != ":memory:":
+                    fp = os.path.abspath(cand)
+                    os.makedirs(os.path.dirname(fp) or ".", exist_ok=True)
+                    sqlite3.connect(fp).close()
+                    return fp
+                return cand
+            except Exception:
+                continue
+        return ":memory:"
+
+    def _con(self):
+        con = sqlite3.connect(self.path, timeout=8)
+        con.row_factory = sqlite3.Row
+        return con
+
+    def add_tick(self, live: dict):
+        g = safe_float((live.get("gold18") or {}).get("price"))
+        if not g:
+            return
+        try:
+            with closing(self._con()) as c:
+                last = c.execute("SELECT ts, gold18 FROM ticks ORDER BY id DESC LIMIT 1").fetchone()
+                if last and last["gold18"]:
+                    gap = 999
+                    try:
+                        gap = (now_utc() - datetime.fromisoformat(last["ts"])).total_seconds()
+                    except Exception:
+                        pass
+                    if abs(float(last["gold18"]) - g) / max(g, 1) < 1e-6 and gap < 240:
+                        return
+                c.execute(
+                    "INSERT INTO ticks(ts,usd,gold18,ounce,silver,copper) VALUES(?,?,?,?,?,?)",
+                    (
+                        now_utc().isoformat(timespec="seconds"),
+                        safe_float((live.get("usd") or {}).get("price")),
+                        g,
+                        safe_float((live.get("ounce") or {}).get("price")),
+                        safe_float((live.get("silver") or {}).get("price")),
+                        safe_float((live.get("copper") or {}).get("price")),
+                    ),
+                )
+                c.commit()
+        except Exception:
+            pass
+
+    def ticks(self, limit: int = 4000) -> pd.DataFrame:
+        try:
+            with closing(self._con()) as c:
+                rows = c.execute(
+                    "SELECT ts,usd,gold18,ounce,silver,copper FROM ticks ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+            if not rows:
+                return pd.DataFrame()
+            df = pd.DataFrame([dict(r) for r in rows])
+            df["dt"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+            return df.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)
+        except Exception:
+            return pd.DataFrame()
+
+    def change(self, col: str, current):
+        if current is None:
+            return None
+        t = self.ticks(limit=600)
+        if t.empty or col not in t.columns:
+            return None
+        s = t.dropna(subset=[col])
+        if len(s) < 2:
+            return None
+        prev = s[(s[col] - current).abs() / max(abs(current), 1) > 1e-6]
+        if prev.empty:
+            return None
+        base = float(prev.iloc[-1][col])
+        return (current / base - 1) * 100 if base > 0 else None
+
+
+@st.cache_resource(show_spinner=False)
+def get_store() -> Store:
+    return Store()
+
+
+# ═══════════════ ۴) داده ═══════════════
+
+
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.mount(
+        "https://",
+        HTTPAdapter(max_retries=Retry(total=2, backoff_factor=1.2,
+                                      status_forcelist=(429, 500, 502, 503, 504))),
+    )
+    s.headers.update(UA)
+    return s
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def fetch_live() -> dict:
+    out = {"usd": None, "gold18": None, "ounce": None, "silver": None, "copper": None,
+           "at": now_utc().isoformat(timespec="seconds"), "errors": []}
+    s = _session()
+    try:
+        r = s.get(LIVE_API, timeout=(5, 12))
+        r.raise_for_status()
+        for it in (r.json().get("data") or []):
+            sym = str(it.get("symbol", ""))
+            if sym in ("USD_IRR_FREE", "GOLD_18K_IRR"):
+                p = safe_float(it.get("price"))
+                if p:
+                    out["usd" if sym.startswith("USD") else "gold18"] = {"price": p,
+                                                                        "chg": safe_float(it.get("change_pct"))}
+    except Exception as e:
+        out["errors"].append(f"iran-market: {scr(e)}")
+    for k, sym in (("ounce", "XAU"), ("silver", "XAG"), ("copper", "HG")):
+        try:
+            r = s.get(METAL_API.format(sym), timeout=(4, 8))
+            r.raise_for_status()
+            p = safe_float(r.json().get("price"))
+            if p:
+                out[k] = {"price": p}
+        except Exception as e:
+            out["errors"].append(f"gold-api/{sym}: {scr(e)}")
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_history(days: int = 240):
+    def load(url):
+        r = _session().get(url, timeout=(6, 15))
+        r.raise_for_status()
+        df = pd.DataFrame(r.json().get("data") or [])
+        if df.empty:
+            return None
+        dc, cc = _pick(df, ["ts", "timestamp", "datetime", "date_jalali", "date", "day"]), _pick(
+            df, ["close", "price", "value", "p"])
+        if not dc or not cc:
+            return None
+        out = pd.DataFrame({"dt": df[dc].map(_dt), "close": pd.to_numeric(df[cc], errors="coerce")}).dropna()
+        return out.sort_values("dt") if not out.empty else None
+
+    try:
+        u, g = load(HISTORY_USD), load(HISTORY_GOLD18)
+        if u is None or g is None:
+            return None
+        u, g = u.rename(columns={"close": "usd"}), g.rename(columns={"close": "gold18"})
+        for d in (u, g):
+            d["day"] = d["dt"].dt.normalize()
+        u = u.groupby("day", as_index=False).last()[["day", "usd"]]
+        g = g.groupby("day", as_index=False).last()[["day", "gold18"]]
+        df = pd.merge(g, u, on="day", how="inner").sort_values("day").reset_index(drop=True)
+        df = df[(df["gold18"] > 0) & (df["usd"] > 1000)]
+        r = df["gold18"].pct_change(fill_method=None)
+        df = df[(r.abs() < 0.25) | r.isna()].reset_index(drop=True)
+        return df.tail(days)
+    except Exception:
+        return None
+
+
+# ═══════════════ ۵) موتور استراتژی‌ها ═══════════════
+
+
+def rz(s: pd.Series, win: int = 60) -> pd.Series:
+    """z مقاوم با میانه/MAD روی پنجرهٔ گذشته؛ خودِ مقدار جاری در پایه حساب نمی‌شود."""
+    base = s.shift(1)
+    med = base.rolling(win, min_periods=20).median()
+    mad = (base - med).abs().rolling(win, min_periods=20).median()
+    sd = (mad * 1.4826).replace(0, np.nan)
+    return ((s - med) / sd).clip(-3, 3)
+
+
+def build_panel(h: pd.DataFrame) -> pd.DataFrame:
+    d = pd.DataFrame({"day": h["day"], "close": h["gold18"].astype(float), "usd": h["usd"].astype(float)})
+    d["ret"] = np.log(d["close"]).diff()
+    d["ema20"] = d["close"].ewm(span=20, adjust=False).mean()
+    d["ema60"] = d["close"].ewm(span=60, adjust=False).mean()
+    d["ma20"] = d["close"].rolling(20).mean()
+    d["sd20"] = d["close"].rolling(20).std()
+    d["sigma"] = d["ret"].ewm(span=12, adjust=False).std()
+    d["slope"] = d["ema20"] / d["ema20"].shift(5) - 1
+    d["ratio"] = d["close"] / d["usd"]
+    d["usd_mom"] = np.log(d["usd"]).diff(5)
+    d["usd_ret"] = np.log(d["usd"]).diff()
+    d["corr"] = d["ret"].rolling(30, min_periods=15).corr(d["usd_ret"])
+    d["hh"] = d["close"].rolling(20).max().shift(1)
+    d["ll"] = d["close"].rolling(20).min().shift(1)
+
+    d["s_trend"] = (rz(d["slope"], CFG["z_win"]) / 2).clip(-1, 1)
+    rng = (d["hh"] - d["ll"]).replace(0, np.nan)
+    d["s_break"] = ((d["close"] - (d["hh"] + d["ll"]) / 2) / (rng / 2)).clip(-1, 1)
+    gate = 1 / (1 + np.exp(1.2 * (rz(d["slope"], CFG["z_win"]).abs() - 1.2)))
+    d["s_value"] = ((-rz(d["ratio"], CFG["z_win"]) / 1.5).clip(-1, 1)) * gate
+    d["s_fx"] = (rz(d["usd_mom"], CFG["z_win"]) / 2).clip(-1, 1) * d["corr"].fillna(0).clip(0, 1)
+
+    H = CFG["horizon_days"]
+    d["fwd"] = d["close"].pct_change(H, fill_method=None).shift(-H) * 100
+
+    def skill(col: str) -> pd.Series:
+        s = d[col]
+        contrib = (np.sign(s) * d["fwd"]).where(s.abs() >= 0.30)
+        # نتیجهٔ هر سیگنال فقط H روز بعد معلوم می‌شود؛ پس وزن‌ها H+1 روز عقب‌اند (ضدِ نگاه به آینده)
+        return contrib.ewm(span=CFG["ew_span"], min_periods=10).mean().shift(H + 1)
+
+    sk = pd.DataFrame({k: skill(f"s_{k}") for k in STRATS})
+    w = np.exp(sk.fillna(0.0) * 1.0)
+    w = w.div(w.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    d["composite"] = (w.values * d[[f"s_{k}" for k in STRATS]].values).sum(axis=1)
+    for k in STRATS:
+        d[f"w_{k}"] = w[k].values
+        d[f"k_{k}"] = sk[k].values
+    return d
+
+
+def walk_probability(d: pd.DataFrame) -> pd.Series:
+    """کالیبراسیون تجربی: احتمال صعود از نزدیک‌ترین نمونه‌های گذشته، با شرینک اندازهٔ نمونه."""
+    H = CFG["horizon_days"]
+    comp = d["composite"].fillna(0.0).values
+    fwd = d["fwd"].values
+    n = len(comp)
+    p = np.full(n, 0.5)
+    for i in range(n):
+        upto = max(0, i - H)  # فقط نمونه‌هایی که نتیجه‌شان تا امروز معلوم شده
+        idx = np.where(~np.isnan(fwd[:upto]))[0]
+        if len(idx) < 20:
+            continue
+        nn = idx[np.argsort(np.abs(comp[idx] - comp[i]))[: CFG["knn_k"]]]
+        up = float((fwd[nn] > 0).mean())
+        m = len(nn)
+        p[i] = (m / (m + CFG["shrink"])) * up + (CFG["shrink"] / (m + CFG["shrink"])) * 0.5
+    return pd.Series(np.clip(p, 0.15, 0.85), index=d.index)
+
+
+def run_backtest(d: pd.DataFrame, p: pd.Series) -> dict:
+    H = CFG["horizon_days"]
+    thr = CFG["cost_pct"] * CFG["cost_mult"]
+    sigma_pct = (d["sigma"].fillna(CFG["fallback_sigma"]) * 100).values
+    comp = d["composite"].fillna(0.0).values
+    pv = p.values
+    edge = (2 * pv - 1) * 0.8 * sigma_pct * math.sqrt(H)
+
+    pos = np.where((edge >= thr) & (comp > 0), 1, np.where((edge <= -thr) & (comp < 0), -1, 0))
+    close = d["close"].values.astype(float)
+
+    trades, i = [], 0
+    while i < len(d) - H:
+        if pos[i] != 0:
+            ret = (close[i + H] / close[i] - 1) * 100 * pos[i] - CFG["cost_pct"]
+            trades.append({"day": d["day"].iloc[i], "side": int(pos[i]), "ret": ret,
+                           "p": pv[i], "sigma": sigma_pct[i]})
+            i += H
+        else:
+            i += 1
+
+    tdf = pd.DataFrame(trades)
+    if tdf.empty:
+        return {"n": 0, "win": None, "pf": None, "exp": None, "total": None, "dd": None,
+                "sharpe": None, "trades": tdf, "equity": pd.Series(dtype=float), "pos": pos}
+
+    eq = (1 + tdf["ret"] / 100).cumprod()
+    peak = eq.cummax()
+    dd = float(((eq / peak) - 1).min() * 100)
+    wins, losses = tdf[tdf["ret"] > 0]["ret"], tdf[tdf["ret"] <= 0]["ret"]
+    pf = float(wins.sum() / abs(losses.sum())) if len(losses) and losses.sum() != 0 else None
+    sharpe = float(tdf["ret"].mean() / tdf["ret"].std() * math.sqrt(252 / H)) if len(tdf) > 2 and tdf["ret"].std() > 0 else None
+    return {
+        "n": len(tdf), "win": float((tdf["ret"] > 0).mean() * 100),
+        "pf": pf, "exp": float(tdf["ret"].mean()), "total": float(eq.iloc[-1] - 1) * 100,
+        "dd": dd, "sharpe": sharpe, "trades": tdf, "equity": eq, "pos": pos,
+    }
+
+
+def build_engine(history, live: dict, ticks: pd.DataFrame) -> dict:
+    price = safe_float((live.get("gold18") or {}).get("price"))
+    usd = safe_float((live.get("usd") or {}).get("price"))
+    ounce = safe_float((live.get("ounce") or {}).get("price"))
+    res = {"ok": False, "price": price, "usd": usd, "ounce": ounce, "n_days": 0}
+
+    theo = ounce * usd / OUNCE_GRAM * FINENESS_18K if (ounce and usd) else None
+    prem = (price - theo) / theo * 100 if (theo and price) else None
+    res.update(theo=theo, prem=prem, prem_z=None, prem_est=True)
+
+    if ticks is not None and len(ticks) >= 40 and prem is not None:
+        t = ticks.dropna(subset=["gold18", "usd", "ounce"]).copy()
+        if len(t) >= 40:
+            intr = t["ounce"] * t["usd"] / OUNCE_GRAM * FINENESS_18K
+            t["prem"] = (t["gold18"] - intr) / intr * 100
+            win = t["prem"].tail(CFG["z_win"])
+            med = float(win.median())
+            sd = max(float((win - med).abs().median()) * 1.4826, 0.4)
+            res.update(prem_z=(prem - med) / sd, prem_est=False, prem_med=med)
+    if res["prem_z"] is None and prem is not None:
+        res["prem_z"] = (prem - CFG["prem_mean_default"]) / CFG["prem_sd_default"]
+
+    if history is None or len(history) < 40 or not price:
+        res["reason"] = "تاریخ روزانهٔ کافی در دسترس نیست" if history is None or len(history) < 40 else "قیمت زنده نیست"
+        return res
+
+    d = build_panel(history)
+    d = d.dropna(subset=["composite"]).reset_index(drop=True)
+    if len(d) < 25:
+        res["reason"] = "پنجرهٔ معتبر کوتاه است"
+        return res
+
+    p = walk_probability(d)
+    bt = run_backtest(d, p)
+    d["p"] = p
+
+    last = d.iloc[-1]
+    sigma_d = float(last["sigma"]) if not math.isnan(last["sigma"]) else CFG["fallback_sigma"]
+    comp = float(last["composite"])
+    p_now = float(p.iloc[-1])
+    thr = CFG["cost_pct"] * CFG["cost_mult"]
+    edge = (2 * p_now - 1) * 0.8 * sigma_d * 100 * math.sqrt(CFG["horizon_days"])
+
+    if abs(edge) >= thr and comp > 0:
+        decision = "خرید"
+    elif abs(edge) >= thr and comp < 0:
+        decision = "فروش / کاهش"
     else:
-        factors_txt = "\n• عامل قوی خاصی در داده‌های فعلی دیده نشد."
+        decision = "نظاره"
 
-    lines = [
-        "📊 گزارش وضعیت بازار فلزات",
-        f"📅 {j_date}  |  🕐 {j_time}",
+    denom = 0.8 * sigma_d * 100 * math.sqrt(CFG["horizon_days"])
+    p_req = min(0.95, 0.5 + (thr / denom) / 2) if denom > 0 else 0.5
+
+    sides = {k: float(last[f"s_{k}"]) for k in STRATS}
+    agree = sum(1 for v in sides.values() if v * comp > 0 and abs(v) >= 0.2)
+    conf = min(CFG["max_conf"], max(50.0, 50 + abs(p_now - 0.5) * 200 * (0.55 + 0.45 * agree / len(STRATS))))
+
+    if abs(comp) < 0.15:
+        regime = "بی‌جهت"
+    elif float(last["slope"]) > 0 and comp > 0:
+        regime = "روند صعودی"
+    elif float(last["slope"]) < 0 and comp < 0:
+        regime = "روند نزولی"
+    else:
+        regime = "رنج"
+
+    res.update(
+        ok=True, panel=d, backtest=bt, p_now=p_now, p_req=p_req, comp=comp,
+        decision=decision, edge=edge, threshold=thr, sigma_d=sigma_d,
+        conf=conf, agree=agree, sides=sides, regime=regime,
+        weights={k: float(last[f"w_{k}"]) for k in STRATS},
+        skills={k: (None if pd.isna(last[f"k_{k}"]) else float(last[f"k_{k}"])) for k in STRATS},
+        ema20=float(last["ema20"]), ema60=float(last["ema60"]),
+        ma20=float(last["ma20"]) if not pd.isna(last["ma20"]) else None,
+        sd20=float(last["sd20"]) if not pd.isna(last["sd20"]) else None,
+        hh=float(last["hh"]) if not pd.isna(last["hh"]) else None,
+        ll=float(last["ll"]) if not pd.isna(last["ll"]) else None,
+        ratio_z=float(rz(d["ratio"]).iloc[-1]) if not pd.isna(rz(d["ratio"]).iloc[-1]) else None,
+        corr=float(last["corr"]) if not pd.isna(last["corr"]) else None,
+        n_days=len(d),
+    )
+    return res
+
+
+def forecast(price: float, sigma_d: float, comp: float) -> dict:
+    out = {}
+    for label, h in (("۱ ساعت", 1 / 24), ("۱ روز", 1.0), ("۳ روز", 3.0)):
+        s = sigma_d * math.sqrt(max(h, 1 / 24))
+        drift = comp * 0.30 * s
+        out[label] = {
+            "lo": price * math.exp(drift - CFG["z80"] * s),
+            "med": price * math.exp(drift),
+            "hi": price * math.exp(drift + CFG["z80"] * s),
+            "move": (math.exp(drift) - 1) * 100,
+            "sig": s * 100,
+        }
+    return out
+
+
+def risk_plan(price: float, sigma_d: float, decision: str, capital: float, risk_pct: float) -> dict:
+    side = 1 if decision == "خرید" else (-1 if "فروش" in decision else 0)
+    stop_pct = CFG["stop_sigma"] * sigma_d
+    if side == 0 or not price:
+        return {"side": 0, "stop": None, "target": None, "stop_pct": stop_pct * 100,
+                "target_pct": CFG["target_sigma"] * sigma_d * 100, "pos_pct": 0.0, "amount": 0.0}
+    pos_pct = min(100.0, risk_pct / (stop_pct * 100) * 100) if stop_pct > 0 else 0.0
+    return {
+        "side": side,
+        "stop": price * (1 - side * stop_pct),
+        "target": price * (1 + side * CFG["target_sigma"] * sigma_d),
+        "stop_pct": stop_pct * 100,
+        "target_pct": CFG["target_sigma"] * sigma_d * 100,
+        "pos_pct": pos_pct,
+        "amount": capital * pos_pct / 100,
+    }
+
+
+# ═══════════════ ۶) متن‌های قابل کپی ═══════════════
+
+
+def signal_text(r: dict, fc: dict, plan: dict) -> str:
+    jd, jt = jalali()
+    L = [
+        "سیگنال طلای ۱۸ عیار",
+        f"{jd} — {jt}",
         "",
-        "━━━━━━━━━━━━━━",
-        "قیمت‌های لحظه‌ای (تقریبی به تومان)",
-        f"🥇 طلای ۱۸ عیار: {g18:,.0f}" if g18 else "🥇 طلای ۱۸ عیار: —",
-        f"💵 دلار آزاد: {usd_p:,.0f}" if usd_p else "💵 دلار آزاد: —",
-        f"🌍 انس طلا: {xau:,.1f} $" if xau else "🌍 انس طلا: —",
+        f"تصمیم: {r['decision']}",
+        f"احتمال رشد: {r['p_now'] * 100:.1f}٪",
+        f"امتیاز ترکیبی: {r['comp']:+.2f}",
+        f"اطمینان: {r['conf']:.0f}٪ — رژیم: {r['regime']}",
         "",
-        "━━━━━━━━━━━━━━",
-        f"🎯 سیگنال: {intel.get('signal', '—')}  |  اطمینان: {intel.get('confidence', 0):.0f}٪",
-        f"رژیم بازار: {intel.get('regime', '—')}",
-        f"احتمال رشد: {intel.get('p_up', 50):.0f}٪  |  احتمال نزول: {intel.get('p_down', 50):.0f}٪",
+        f"قیمت: {fmt(r['price'])} تومان",
+        f"دلار: {fmt(r['usd'])} تومان",
+        f"انس: {fmt(r['ounce'], 1)} دلار",
+        f"پریمیوم: {pc(r['prem'])}" + (" (تخمینی)" if r.get("prem_est") else ""),
         "",
-        "عوامل دخیل:",
-        factors_txt.strip(),
+        f"لبهٔ {CFG['horizon_days']}روزه: {r['edge']:+.2f}٪ | آستانهٔ هزینه: {r['threshold']:.2f}٪",
+        f"برای ورود لازم است احتمال ≥ {r['p_req'] * 100:.0f}٪",
         "",
-        "━━━━━━━━━━━━━━",
+        "پیش‌بینی (بازهٔ ۸۰٪):",
     ]
-    lv = intel.get("levels")
-    if lv:
-        if lv.get("sl"):
-            lines += [
-                f"ورود: {lv['entry']:,.0f}",
-                f"حد ضرر: {lv['sl']:,.0f}",
-                f"هدف: {lv['tp']:,.0f}",
-            ]
-        else:
-            lines.append(f"محدوده نوسان روزانه (ATR): ±{lv['atr']:,.0f}")
-    pred = intel.get("pred")
-    if pred:
-        lines += [
-            "",
-            f"پیش‌بینی فردا: {pred['d1']:,.0f}",
-            f"پیش‌بینی ۳ روز بعد: {pred['d3']:,.0f}",
-        ]
-    lines += ["", "⚠️ این گزارش توصیه سرمایه‌گذاری نیست."]
-    return "\n".join(lines)
+    for label, q in fc.items():
+        L.append(f"• {label}: {fmt(q['lo'])} تا {fmt(q['hi'])} (میانه {fmt(q['med'])})")
+    L.append("")
+    if plan["side"] != 0:
+        L += [f"حد ضرر: {fmt(plan['stop'])} ({plan['stop_pct']:.1f}٪)",
+              f"هدف: {fmt(plan['target'])} ({plan['target_pct']:.1f}٪)",
+              f"حجم: {plan['pos_pct']:.0f}٪ سرمایه"]
+    else:
+        L.append("برنامه: بدون ورود تا روشن شدن لبه.")
+    return "\n".join(L)
 
 
-def build_signal_text(live, intel):
-    j_date, j_time = to_jalali()
-    g18 = (live.get("gold18") or {}).get("price") or 0
-    lines = [
-        "🎯 سیگنال Gold18K",
-        f"📅 {j_date}  |  🕐 {j_time}",
-        "",
-        f"سیگنال: {intel.get('signal', '—')}",
-        f"اطمینان: {intel.get('confidence', 0):.0f}٪",
-        f"احتمال رشد / نزول: {intel.get('p_up', 50):.0f}٪ / {intel.get('p_down', 50):.0f}٪",
-        f"قیمت فعلی طلای ۱۸: {g18:,.0f}",
+def report_text(r: dict, fc: dict, plan: dict, live: dict) -> str:
+    jd, jt = jalali()
+    bt = r["backtest"]
+    L = [
+        "گزارش تحلیلی طلای ۱۸ عیار",
+        f"{jd} — {jt}",
+        "──────────────",
+        "بازار",
+        f"طلای ۱۸ عیار: {fmt(r['price'])} تومان/گرم",
+        f"دلار آزاد: {fmt(r['usd'])} تومان",
+        f"انس جهانی: {fmt(r['ounce'], 1)} دلار",
+        f"ارزش ذاتی (۰.۷۵ عیار): {fmt(r['theo'])} تومان/گرم",
+        f"پریمیوم: {pc(r['prem'])}" + (f" | z={r['prem_z']:+.2f}" if r.get("prem_z") is not None else ""),
+        "──────────────",
+        "تصمیم",
+        f"سیگنال: {r['decision']}",
+        f"احتمال کالیبره: {r['p_now'] * 100:.1f}٪ (آستانهٔ لازم {r['p_req'] * 100:.0f}٪)",
+        f"لبهٔ تخمینی: {r['edge']:+.2f}٪ | هزینهٔ رفت‌وبرگشت: {CFG['cost_pct']:.2f}٪ | آستانه: {r['threshold']:.2f}٪",
+        f"رژیم: {r['regime']} | توافق استراتژی‌ها: {r['agree']} از ۴",
+        "──────────────",
+        "لایه‌های استراتژی",
     ]
-    lv = intel.get("levels")
-    if lv:
-        if lv.get("sl"):
-            lines += [f"ورود: {lv['entry']:,.0f}", f"حد ضرر: {lv['sl']:,.0f}", f"هدف: {lv['tp']:,.0f}"]
-        else:
-            lines.append(f"محدوده نوسان روزانه (ATR): ±{lv['atr']:,.0f}")
-    lines += ["", "⚠️ توصیه سرمایه‌گذاری نیست."]
-    return "\n".join(lines)
-
-
-# ====================== اجرا ======================
-live = fetch_live()
-feat = build_dataset()
-
-if not live.get("gold18"):
-    st.error("داده زنده در دسترس نیست. چند لحظه دیگر تلاش کنید.")
-    st.stop()
-
-intel = intelligence_engine(live, feat)
-report_text = build_market_report(live, intel)
-signal_text = build_signal_text(live, intel)
-bt = quick_backtest(feat) if feat is not None else None
-
-# ====================== هدر ======================
-st.markdown("""
-<div style="text-align:center;margin-bottom:1.2rem;">
-    <div style="font-size:1.5rem;font-weight:800;color:#e3b341;letter-spacing:0.3px;">🥇 Gold18K Intelligence</div>
-    <div style="color:#8b949e;font-size:0.85rem;">موتور سیگنال طلای ۱۸ عیار</div>
-</div>
-""", unsafe_allow_html=True)
-
-c1, c2, c3, c4 = st.columns(4)
-
-def card(label, value, chg=None):
-    delta = ""
-    if chg is not None:
-        cls = "pos" if chg >= 0 else "neg"
-        delta = f'<div class="{cls}" style="font-size:0.78rem;font-weight:600;">{chg:+.2f}%</div>'
-    st.markdown(
-        f'<div class="card"><div class="card-label">{label}</div>'
-        f'<div class="card-value">{value}</div>{delta}</div>',
-        unsafe_allow_html=True
-    )
-
-with c1:
-    card("دلار آزاد", f"{live['usd']['price']:,.0f}" if live.get("usd") else "—", live.get("usd", {}).get("chg"))
-with c2:
-    card("طلای ۱۸ عیار", f"{live['gold18']['price']:,.0f}", live.get("gold18", {}).get("chg"))
-with c3:
-    card("انس جهانی", f"{live['ounce']['price']:,.1f} $" if live.get("ounce") and live["ounce"].get("price") else "—")
-with c4:
-    prem_txt = f"{intel['prem']:+.2f}%" if intel["prem"] is not None else "—"
-    card("پریمیوم", prem_txt)
-
-# ====================== دکمه‌ها ======================
-st.markdown("---")
-b1, b2, b3 = st.columns([1, 1.2, 1.2])
-
-with b1:
-    if st.button("🔄 بروزرسانی", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-with b2:
-    st.download_button(
-        label="💾 دانلود گزارش کامل",
-        data=report_text,
-        file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-        mime="text/plain",
-        use_container_width=True
-    )
-with b3:
-    st.download_button(
-        label="🎯 دانلود سیگنال",
-        data=signal_text,
-        file_name=f"signal_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-        mime="text/plain",
-        use_container_width=True
-    )
-
-with st.expander("📋 مشاهده و کپی متن گزارش"):
-    st.code(report_text, language=None)
-
-# ====================== تب‌ها ======================
-t1, t2, t3, t4 = st.tabs(["🎯 سیگنال", "🔮 پیش‌بینی", "📊 اندیکاتورها", "📈 روند قیمت"])
-
-with t1:
-    sig_class = "buy" if "خرید" in intel["signal"] else "sell" if "فروش" in intel["signal"] else "neutral"
-    st.markdown(
-        f'<div class="signal-box {sig_class}">{intel["signal"]}  •  اطمینان {intel["confidence"]:.0f}٪</div>',
-        unsafe_allow_html=True
-    )
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("احتمال رشد", f"{intel['p_up']:.0f}٪")
-    m2.metric("احتمال نزول", f"{intel['p_down']:.0f}٪")
-    m3.metric("امتیاز موتور", f"{intel['score']:+.1f} از 10.5")
-
-    if intel.get("levels"):
-        lv = intel["levels"]
-        st.markdown('<div class="section">سطوح معامله</div>', unsafe_allow_html=True)
-        if lv.get("sl"):
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("ورود", f"{lv['entry']:,.0f}")
-            k2.metric("حد ضرر", f"{lv['sl']:,.0f}")
-            k3.metric("هدف", f"{lv['tp']:,.0f}")
-            k4.metric("ATR روزانه", f"±{lv['atr']:,.0f}")
-        else:
-            st.info(f"محدوده نوسان روزانه (ATR): ±{lv['atr']:,.0f} تومان — سیگنال فعال نیست.")
-
-    st.markdown('<div class="section">عوامل مؤثر</div>', unsafe_allow_html=True)
-    if intel["factors"]:
-        for name, sc, desc in intel["factors"]:
-            chip = "pos" if sc > 0 else "neg" if sc < 0 else "neutral"
-            chip_color = "color:#8b949e;" if sc == 0 else ""
-            st.markdown(
-                f'<div class="factor"><div><div class="factor-name">{name}</div>'
-                f'<div class="factor-desc">{desc}</div></div>'
-                f'<span class="chip {chip}" style="{chip_color}">{sc:+.1f}</span></div>',
-                unsafe_allow_html=True
-            )
-    else:
-        st.write("عامل قوی خاصی شناسایی نشد.")
-
-    st.info(f"رژیم: **{intel['regime']}** | پریمیوم: {intel['prem']:+.2f}٪" if intel["prem"] is not None
-            else f"رژیم: **{intel['regime']}**")
-
-    if bt:
-        st.caption(f"🧪 بک‌تست روی {len(feat)} روز گذشته: {bt['n']} سیگنال، دقت جهت روز بعد ≈ {bt['hit']:.0f}٪")
-
-with t2:
-    if intel.get("pred"):
-        p = intel["pred"]
-        a, b, c = st.columns(3)
-        a.metric("فعلی", f"{live['gold18']['price']:,.0f}")
-        b.metric("فردا (نقطه‌ای)", f"{p['d1']:,.0f}",
-                 delta=f"{(p['d1'] / live['gold18']['price'] - 1) * 100:+.2f}%")
-        c.metric("۳ روز بعد", f"{p['d3']:,.0f}",
-                 delta=f"{(p['d3'] / live['gold18']['price'] - 1) * 100:+.2f}%")
-        st.caption(f"محدوده فردا: {p['d1_low']:,.0f} تا {p['d1_high']:,.0f}")
-        st.caption(f"محدوده ۳روزه: {p['d3_low']:,.0f} تا {p['d3_high']:,.0f}")
-        st.caption(f"بازده انتظاری روزانه: {p['expected_daily']:+.2f}٪")
-    else:
-        st.warning("داده کافی برای پیش‌بینی نیست.")
-
-with t3:
-    row = intel.get("row")
-    if row is not None:
-        rows = [
-            ("EMA20", f"{row['ema20']:,.0f}"),
-            ("EMA50", f"{row['ema50']:,.0f}"),
-            ("RSI (14)", f"{row['rsi']:.1f}"),
-            ("MACD Hist", f"{row['macd_hist']:,.0f}"),
-            ("موقعیت بولینگر (σ)", f"{row['bb_pos']:+.2f}" if not np.isnan(row["bb_pos"]) else "—"),
-            ("مومنتوم ۳روزه", f"{row['mom3']:+.2f}%"),
-            ("مومنتوم ۵روزه", f"{row['mom5']:+.2f}%"),
-            ("مومنتوم ۱۰روزه", f"{row['mom10']:+.2f}%"),
-            ("نوسان ۱۰روزه", f"{row['vol10']:.2f}%"),
-            ("همبستگی با دلار", f"{row['corr']:.2f}" if not np.isnan(row["corr"]) else "—"),
-            ("تئوریک (انس×دلار)", f"{intel['theo']:,.0f}" if intel["theo"] else "—"),
-            ("Z-Score پریمیوم", f"{intel['z_prem']:+.2f}" if intel["z_prem"] is not None else "—"),
-        ]
-        html = "<table class='ind'><tr><th>شاخص</th><th style='text-align:left'>مقدار</th></tr>"
-        for n, v in rows:
-            html += f"<tr><td>{n}</td><td class='v'>{v}</td></tr>"
-        html += "</table>"
-        st.markdown(html, unsafe_allow_html=True)
-    else:
-        st.warning("داده تاریخی کافی برای محاسبه اندیکاتورها نیست.")
-
-with t4:
-    if feat is not None and len(feat) > 8:
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Scatter(x=feat["date"], y=feat["gold18"], name="طلای ۱۸ عیار",
-                                 line=dict(color="#e3b341", width=2.2)), secondary_y=False)
-        if "ema20" in feat.columns:
-            fig.add_trace(go.Scatter(x=feat["date"], y=feat["ema20"], name="EMA20",
-                                     line=dict(color="#58a6ff", width=1, dash="dot")), secondary_y=False)
-        fig.add_trace(go.Scatter(x=feat["date"], y=feat["usd"], name="دلار",
-                                 line=dict(color="#3fb950", width=1.2, dash="dash")), secondary_y=True)
-        fig.update_layout(
-            template="plotly_dark", height=320,
-            margin=dict(l=10, r=10, t=15, b=10),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            legend=dict(orientation="h", y=1.1),
-            xaxis=dict(showgrid=False), yaxis=dict(showgrid=False),
+    for k, name in STRATS.items():
+        sk = r["skills"].get(k)
+        L.append(
+            f"{name}: امتیاز {r['sides'][k]:+.2f} | وزن {r['weights'][k] * 100:.0f}٪"
+            + (f" | مهارت اخیر {sk:+.2f}٪" if sk is not None else "")
         )
-        st.plotly_chart(fig, use_container_width=True)
+    L += ["──────────────", "پیش‌بینی"]
+    for label, q in fc.items():
+        L.append(f"{label}: {fmt(q['lo'])} — {fmt(q['med'])} — {fmt(q['hi'])} | نوسان دوره {q['sig']:.2f}٪")
+    L += ["──────────────", "برنامهٔ ریسک"]
+    if plan["side"] != 0:
+        L += [f"حد ضرر {fmt(plan['stop'])} ({plan['stop_pct']:.1f}٪) · هدف {fmt(plan['target'])} ({plan['target_pct']:.1f}٪)",
+              f"نسبت سود به ضرر {CFG['target_sigma'] / CFG['stop_sigma']:.1f} · حجم {plan['pos_pct']:.0f}٪ سرمایه"]
     else:
-        st.warning("داده تاریخی در دسترس نیست.")
+        L.append("بدون ورود؛ حجم صفر.")
+    L += ["──────────────", "کارنامهٔ بک‌تست (گام‌به‌گام، با هزینه)"]
+    if bt["n"]:
+        L += [f"تعداد معامله: {bt['n']}",
+              f"نرخ برد: {bt['win']:.1f}٪",
+              f"میانگین بازده هر معامله: {bt['exp']:+.2f}٪",
+              f"سود انباشته: {bt['total']:+.1f}٪ | حداکثر افت: {bt['dd']:.1f}٪",
+              f"Profit Factor: {bt['pf']:.2f}" if bt["pf"] else "Profit Factor: —"]
+    else:
+        L.append("معامله‌ای در پنجرهٔ آزمون ثبت نشد.")
+    L += ["──────────────",
+          f"کیفیت داده: {r['n_days']} روز تاریخ · بروزرسانی {age_txt(live.get('at'))}",
+          "این گزارش تحلیلی است و توصیهٔ سرمایه‌گذاری نیست."]
+    return "\n".join(L)
 
-st.caption("این ابزار تحلیلی است و توصیه سرمایه‌گذاری نیست. مدیریت ریسک و حد ضرر در مسئولیت خود شماست.")
+
+# ═══════════════ ۷) ظاهر ═══════════════
+
+CSS = """
+<style>
+@import url('https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css');
+:root{
+  --bg:#f5f6fa; --surface:#ffffff; --ink:#101828; --muted:#667085; --line:#e5e8f0;
+  --gold:#b45309; --gold2:#f59e0b; --up:#0e9f6e; --down:#dc2626; --soft:#fff8ec;
+}
+html, body, [class*="css"], .stMarkdown, div, p, span, label, input, button, td, th {
+  font-family: Vazirmatn, Tahoma, sans-serif !important;
+}
+.stApp{ background: var(--bg) !important; }
+.block-container{ max-width: 1120px; padding-top: 1.2rem; padding-bottom: 2.5rem; direction: rtl; text-align: right; }
+#MainMenu, footer, [data-testid="stToolbar"]{ visibility: hidden; height: 0; }
+.num{ font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+.topbar{ display:flex; align-items:center; justify-content:space-between; gap:12px;
+  background: linear-gradient(100deg,#181d2b,#232a3d 60%,#2c2413);
+  border:1px solid #2d3446; border-radius:16px; padding:14px 18px; margin-bottom:14px; }
+.brand{ display:flex; align-items:center; gap:10px; }
+.brand-title{ color:#fff; font-size:1.05rem; font-weight:700; letter-spacing:-.01em; }
+.brand-sub{ color:#a9b1c6; font-size:.72rem; }
+.chip{ display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:999px;
+  font-size:.72rem; font-weight:600; border:1px solid; background:rgba(255,255,255,.06); }
+.chip-ok{ color:#6ee7b7; border-color:#0e9f6e; }
+.chip-warn{ color:#fcd34d; border-color:#b45309; }
+.chip-mut{ color:#c7cede; border-color:#3a4358; }
+
+.grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+@media (max-width:820px){ .grid{ grid-template-columns:repeat(2,1fr); } }
+.kpi{ background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:13px 14px;
+  box-shadow:0 1px 2px rgba(16,24,40,.04); }
+.kpi-h{ display:flex; align-items:center; gap:7px; color:var(--muted); font-size:.74rem; margin-bottom:7px; }
+.kpi-v{ color:var(--ink); font-size:1.28rem; font-weight:700; letter-spacing:-.02em; line-height:1.25; }
+.kpi-s{ font-size:.72rem; margin-top:4px; color:var(--muted); }
+.up{ color:var(--up) !important; } .down{ color:var(--down) !important; }
+
+.hero{ background:var(--surface); border:1px solid var(--line); border-radius:16px; padding:18px;
+  box-shadow:0 1px 2px rgba(16,24,40,.05); margin-top:12px; }
+.hero-top{ display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+.dec{ font-size:1.6rem; font-weight:800; letter-spacing:-.02em; }
+.dec-buy{ color:#0e9f6e; } .dec-sell{ color:#dc2626; } .dec-wait{ color:#475467; }
+.pill{ display:inline-block; padding:4px 12px; border-radius:999px; font-size:.72rem; font-weight:700;
+  background:var(--soft); color:var(--gold); border:1px solid #f3ddb4; }
+.meter{ margin-top:14px; }
+.meter-track{ position:relative; height:12px; border-radius:999px; overflow:hidden;
+  background:#eef0f6; display:flex; }
+.meter-down{ background:linear-gradient(90deg,#fca5a5,#dc2626); }
+.meter-up{ background:linear-gradient(90deg,#34d399,#0e9f6e); }
+.meter-mark{ position:absolute; top:-4px; width:3px; height:20px; background:#101828; border-radius:2px; }
+.meter-legend{ display:flex; justify-content:space-between; font-size:.7rem; color:var(--muted); margin-top:6px; }
+
+.card{ background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px;
+  box-shadow:0 1px 2px rgba(16,24,40,.04); }
+.h{ font-size:.92rem; font-weight:700; color:var(--ink); margin:0 0 10px; display:flex; align-items:center; gap:8px; }
+.row{ display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px dashed var(--line); font-size:.85rem; }
+.row:last-child{ border-bottom:none; }
+.k{ color:var(--muted); } .v{ color:var(--ink); font-weight:600; }
+.tag{ font-size:.7rem; padding:2px 8px; border-radius:6px; background:#f2f4f8; color:#475467; font-weight:600; }
+
+[data-testid="stMetricValue"]{ color:var(--ink) !important; font-size:1.15rem !important; font-weight:700; }
+[data-testid="stMetricLabel"]{ color:var(--muted) !important; font-size:.78rem; }
+div.stButton > button{ border-radius:10px; font-weight:600; padding:8px 14px; min-height:42px;
+  display:flex; align-items:center; justify-content:center; line-height:1.3; border:1px solid var(--line);
+  background:#fff; color:var(--ink); }
+div.stButton > button:hover{ border-color:var(--gold2); color:var(--gold); }
+div.stButton > button[kind="primary"]{ background:linear-gradient(100deg,#b45309,#f59e0b); color:#fff; border:none; }
+div[data-testid="stDownloadButton"] > button{ border-radius:10px; border:1px solid var(--line);
+  background:#fff; color:var(--ink); font-weight:600; padding:8px 14px; min-height:42px; }
+div[data-testid="stDownloadButton"] > button:hover{ border-color:var(--gold2); color:var(--gold); }
+[data-baseweb="tab-list"]{ gap:6px; }
+[data-baseweb="tab"]{ border-radius:9px !important; padding:6px 14px !important; }
+.stExpander, [data-testid="stExpander"]{ border:1px solid var(--line); border-radius:12px; background:#fff; }
+code, pre{ direction: ltr; text-align: left; }
+.stCode, pre{ border-radius:10px !important; }
+hr{ border-color:var(--line); }
+</style>
+"""
+
+
+def icon(name: str, color: str = "#b45309") -> str:
+    p = {
+        "usd": '<path d="M12 3v18M16 7.5c0-1.7-1.8-2.5-4-2.5s-4 .8-4 2.5S9.8 10 12 10s4 .9 4 2.5S14.2 15 12 15s-4-.8-4-2.5"/>',
+        "gold": '<rect x="4" y="8" width="7" height="5" rx="1"/><rect x="13" y="8" width="7" height="5" rx="1"/><rect x="8.5" y="15" width="7" height="5" rx="1"/>',
+        "globe": '<circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.4 2.5 12.6 0 16M12 4c-2.5 2.4-2.5 12.6 0 16"/>',
+        "scale": '<path d="M12 4v16M6 8h12M6 8l-3 6h6L6 8zm12 0l-3 6h6l-3-6z"/>',
+        "chart": '<path d="M4 19V6M4 19h16M8 15l3-4 3 2 4-6"/>',
+        "bolt": '<path d="M13 3L5 14h5l-1 7 8-11h-5l1-7z"/>',
+        "shield": '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/>',
+        "clock": '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+    }.get(name, "")
+    return (
+        f'<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{color}" '
+        f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{p}</svg>'
+    )
+
+
+def kpi(label, value, sub=None, cls="", ic="gold"):
+    s = f'<div class="kpi-s {cls}">{sub}</div>' if sub else ""
+    st.markdown(
+        f'<div class="kpi"><div class="kpi-h">{icon(ic)}<span>{label}</span></div>'
+        f'<div class="kpi-v num">{value}</div>{s}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def rows(items):
+    body = "".join(
+        f'<div class="row"><span class="k">{k}</span><span class="v num">{v}</span></div>' for k, v in items
+    )
+    return f'<div class="card">{body}</div>'
+
+
+# ═══════════════ ۸) اجرا ═══════════════
+
+
+def main():
+    st.set_page_config(page_title="Gold18K Pro", page_icon="◈", layout="wide",
+                       initial_sidebar_state="collapsed")
+    st.markdown(CSS, unsafe_allow_html=True)
+
+    store = get_store()
+    with st.expander("تنظیمات موتور", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
+        cost = c1.number_input("هزینهٔ رفت‌وبرگشت (٪)", 0.0, 5.0, CFG["cost_pct"], 0.05,
+                               help="اسپرد + اسلیپیج. برای طلای آب‌شده معمولاً ۰.۴ تا ۰.۸ درصد.")
+        risk = c2.number_input("ریسک هر معامله (٪)", 0.1, 5.0, CFG["risk_pct"], 0.1)
+        capital = c3.number_input("سرمایه (تومان)", 0, 10 ** 13, 200_000_000, 10_000_000)
+        horizon = c4.selectbox("افق تصمیم (روز)", [1, 2, 3, 5], index=2)
+    CFG["cost_pct"], CFG["risk_pct"], CFG["horizon_days"] = float(cost), float(risk), int(horizon)
+
+    live = fetch_live()
+    store.add_tick(live)
+    history = fetch_history()
+    ticks = store.ticks()
+    r = build_engine(history, live, ticks)
+
+    jd, jt = jalali()
+    fresh = age_txt(live.get("at"))
+
+    # ── نوار بالا
+    ok_live = r.get("price") is not None
+    st.markdown(
+        f"""<div class="topbar">
+  <div class="brand">{icon("gold", "#f59e0b")}
+    <div><div class="brand-title">Gold18K Pro</div>
+    <div class="brand-sub">موتور تحلیل طلای ۱۸ عیار · نگارش {VERSION} · {BUILD}</div></div>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <span class="chip {'chip-ok' if ok_live else 'chip-warn'}">{'داده زنده' if ok_live else 'داده ناقص'}</span>
+    <span class="chip chip-mut">{jd} · {jt}</span>
+    <span class="chip chip-mut">بروزرسانی {fresh}</span>
+  </div></div>""",
+        unsafe_allow_html=True,
+    )
+
+    if not ok_live:
+        st.error("قیمت زندهٔ طلای ۱۸ عیار در دسترس نیست. چند لحظه بعد دوباره تلاش کنید.")
+        if live.get("errors"):
+            st.caption(" · ".join(live["errors"]))
+        st.stop()
+
+    # ── کارت‌ها
+    g_chg = store.change("gold18", r["price"])
+    u_chg = store.change("usd", r["usd"])
+    c = st.columns(4)
+    with c[0]:
+        kpi("طلای ۱۸ عیار", fmt(r["price"]), pc(g_chg) if g_chg is not None else "تغییر در دسترس نیست",
+            "up" if (g_chg or 0) >= 0 else "down", "gold")
+    with c[1]:
+        kpi("دلار آزاد", fmt(r["usd"]), pc(u_chg) if u_chg is not None else "تغییر در دسترس نیست",
+            "up" if (u_chg or 0) >= 0 else "down", "usd")
+    with c[2]:
+        kpi("انس جهانی", fmt(r["ounce"], 1) + " $", "دلار بر انس", "", "globe")
+    with c[3]:
+        kpi("پریمیوم", pc(r["prem"]),
+            ("تخمینی" if r.get("prem_est") else f"z={r['prem_z']:+.2f}") if r.get("prem_z") is not None else None,
+            "up" if (r.get("prem") or 0) >= 0 else "down", "scale")
+
+    if not r.get("ok"):
+        st.warning(r.get("reason", "موتور نتوانست محاسبه کند."))
+        st.stop()
+
+    plan = risk_plan(r["price"], r["sigma_d"], r["decision"], capital, risk)
+    fc = forecast(r["price"], r["sigma_d"], r["comp"])
+
+    # ── قهرمان تصمیم
+    dcls = "dec-buy" if r["decision"] == "خرید" else ("dec-sell" if "فروش" in r["decision"] else "dec-wait")
+    pu = r["p_now"] * 100
+    st.markdown(
+        f"""<div class="hero">
+  <div class="hero-top">
+    <div>
+      <div class="brand-sub" style="margin-bottom:4px;">تصمیم موتور برای افق {CFG['horizon_days']} روزه</div>
+      <div class="dec {dcls}">{r['decision']}</div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <span class="pill">رژیم: {r['regime']}</span>
+      <span class="pill">توافق {r['agree']} از ۴</span>
+      <span class="pill">اطمینان {r['conf']:.0f}٪</span>
+    </div>
+  </div>
+  <div class="meter">
+    <div class="meter-track">
+      <div class="meter-down" style="width:{100 - pu:.1f}%"></div>
+      <div class="meter-up" style="width:{pu:.1f}%"></div>
+      <div class="meter-mark" style="left:{100 - pu:.1f}%"></div>
+    </div>
+    <div class="meter-legend"><span>نزول {100 - pu:.1f}٪</span><span>رشد {pu:.1f}٪</span></div>
+  </div>
+  <div style="margin-top:12px;font-size:.8rem;color:var(--muted);line-height:1.9;">
+    لبهٔ تخمینی <b class="num">{r['edge']:+.2f}٪</b> در برابر آستانهٔ هزینهٔ
+    <b class="num">{r['threshold']:.2f}٪</b> ·
+    {'لبه کافی است' if abs(r['edge']) >= r['threshold'] else f'ورود نیازمند احتمال ≥ <b class="num">{r["p_req"] * 100:.0f}٪</b> است'}
+  </div>
+</div>""",
+        unsafe_allow_html=True,
+    )
+    st.write("")
+
+    # ── منوی برنامه
+    pages = ["نمای کلی", "سیگنال", "پیش‌بینی", "کارنامه", "داده‌ها"]
+    try:
+        page = st.segmented_control("ناوبری", pages, default=pages[0], label_visibility="collapsed")
+        page = page or pages[0]
+    except Exception:
+        page = st.radio("ناوبری", pages, horizontal=True, label_visibility="collapsed")
+    st.write("")
+
+    # ═══ نمای کلی
+    if page == "نمای کلی":
+        left, right = st.columns([1.35, 1])
+        with left:
+            sig_rows = [
+                (f"{STRATS[k]}", f"{r['sides'][k]:+.2f} · وزن {r['weights'][k] * 100:.0f}٪") for k in STRATS
+            ]
+            st.markdown(rows([("امتیاز ترکیبی", f"{r['comp']:+.2f}")] + sig_rows),
+                        unsafe_allow_html=True)
+            st.write("")
+            st.markdown(rows([
+                ("نوسان روزانه (σ)", f"{r['sigma_d'] * 100:.2f}٪"),
+                ("همبستگی دلار", f"{r['corr']:.2f}" if r.get("corr") is not None else "—"),
+                ("z نسبت طلا/دلار", f"{r['ratio_z']:+.2f}" if r.get("ratio_z") is not None else "—"),
+                ("ارزش ذاتی", f"{fmt(r['theo'])} تومان"),
+            ]), unsafe_allow_html=True)
+        with right:
+            bt = r["backtest"]
+            if bt["n"]:
+                st.markdown(rows([
+                    ("نرخ برد بک‌تست", f"{bt['win']:.1f}٪"),
+                    ("تعداد معامله", f"{bt['n']}"),
+                    ("میانگین هر معامله", f"{bt['exp']:+.2f}٪"),
+                    ("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "—"),
+                ]), unsafe_allow_html=True)
+            else:
+                st.info("بک‌تست قابل اتکا هنوز شکل نگرفته است.")
+            st.write("")
+            if plan["side"] != 0:
+                st.markdown(rows([
+                    ("حد ضرر", f"{fmt(plan['stop'])} ({plan['stop_pct']:.1f}٪)"),
+                    ("هدف", f"{fmt(plan['target'])} ({plan['target_pct']:.1f}٪)"),
+                    ("حجم", f"{plan['pos_pct']:.0f}٪ سرمایه"),
+                ]), unsafe_allow_html=True)
+            else:
+                st.markdown(rows([("برنامهٔ معامله", "بدون ورود")]), unsafe_allow_html=True)
+
+        st.write("")
+        p = r["panel"]
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28],
+                            vertical_spacing=0.06)
+        fig.add_trace(go.Scatter(x=p["day"], y=p["close"], name="طلای ۱۸", line=dict(color="#b45309", width=2.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=p["day"], y=p["ema20"], name="EMA20", line=dict(color="#0e9f6e", width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=p["day"], y=p["ema60"], name="EMA60", line=dict(color="#dc2626", width=1.2)), row=1, col=1)
+        if p["sd20"].notna().any():
+            up = p["ma20"] + 2 * p["sd20"]
+            lo = p["ma20"] - 2 * p["sd20"]
+            fig.add_trace(go.Scatter(x=p["day"], y=up, line=dict(width=0), showlegend=False, hoverinfo="skip"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=p["day"], y=lo, line=dict(width=0), fill="tonexty",
+                                     fillcolor="rgba(180,83,9,.07)", name="باند ۲σ", hoverinfo="skip"), row=1, col=1)
+        colors = ["#0e9f6e" if v >= 0 else "#dc2626" for v in p["composite"].fillna(0)]
+        fig.add_trace(go.Bar(x=p["day"], y=p["composite"], marker_color=colors, name="امتیاز"), row=2, col=1)
+        fig.update_layout(template="plotly_white", height=430, margin=dict(l=8, r=8, t=10, b=8),
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                          legend=dict(orientation="h", y=1.08, x=0.02, font=dict(size=10)),
+                          bargap=0.2)
+        fig.update_yaxes(showgrid=True, gridcolor="#eef0f6", tickformat=",", row=1, col=1)
+        fig.update_yaxes(showgrid=False, zeroline=True, zerolinecolor="#d0d5e2", row=2, col=1)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ═══ سیگنال
+    elif page == "سیگنال":
+        st.markdown('<div class="h">لایه‌های استراتژی</div>', unsafe_allow_html=True)
+        st.dataframe(
+            pd.DataFrame([{
+                "استراتژی": STRATS[k],
+                "امتیاز امروز": round(r["sides"][k], 2),
+                "وزن": f"{r['weights'][k] * 100:.0f}٪",
+                "مهارت اخیر": ("—" if r["skills"][k] is None else f"{r['skills'][k]:+.2f}٪"),
+                "نقش": {"trend": "مومنتوم زمانی", "break": "شکست کانال ۲۰ روزه",
+                        "value": "بازگشت نسبت طلا/دلار", "fx": "سرایت نرخ دلار"}[k],
+            } for k in STRATS]),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "وزن هر لایه با عملکرد گذشتهٔ خودش (میانگین نمایی، عقب‌افتاده به اندازهٔ افق) تنظیم می‌شود؛ "
+            "لایهٔ بی‌مهارت وزن نزدیک صفر می‌گیرد."
+        )
+
+        st.write("")
+        st.markdown('<div class="h">حساب ارزش انتظاری</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([{
+            "احتمال کالیبره": f"{r['p_now'] * 100:.1f}٪",
+            "احتمال لازم": f"{r['p_req'] * 100:.0f}٪",
+            "لبه": f"{r['edge']:+.2f}٪",
+            "آستانهٔ هزینه": f"{r['threshold']:.2f}٪",
+            "نتیجه": "ورود مجاز" if abs(r["edge"]) >= r["threshold"] else "ورود مجاز نیست",
+        }]), use_container_width=True, hide_index=True)
+        st.caption("لبه = (۲p−۱) × ۰.۸σ × √افق. σ از نوسان تحقق‌یافته می‌آید و p با k‑نزدیک‌ترین همسایه کالیبره می‌شود.")
+
+        st.write("")
+        st.markdown('<div class="h">سطوح تصمیم</div>', unsafe_allow_html=True)
+        st.markdown(rows([
+            ("EMA20", fmt(r["ema20"])),
+            ("EMA60", fmt(r["ema60"])),
+            ("سقف کانال ۲۰ روزه", fmt(r["hh"])),
+            ("کف کانال ۲۰ روزه", fmt(r["ll"])),
+            ("+۲σ", fmt((r["ma20"] or 0) + 2 * (r["sd20"] or 0))),
+            ("−۲σ", fmt((r["ma20"] or 0) - 2 * (r["sd20"] or 0))),
+        ]), unsafe_allow_html=True)
+        st.caption("عبور قیمت از هر یک از این سطوح، وزن‌های موتور را جابه‌جا می‌کند و می‌تواند تصمیم را عوض کند.")
+
+        st.write("")
+        st.markdown('<div class="h">متن آمادهٔ سیگنال</div>', unsafe_allow_html=True)
+        st.code(signal_text(r, fc, plan), language=None)
+        st.download_button("دانلود متن سیگنال", signal_text(r, fc, plan),
+                           file_name=f"signal_{datetime.now():%Y%m%d_%H%M}.txt", mime="text/plain")
+
+    # ═══ پیش‌بینی
+    elif page == "پیش‌بینی":
+        st.markdown('<div class="h">بازهٔ ۸۰٪ برای هر افق</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([{
+            "افق": label,
+            "کمینه": fmt(q["lo"]),
+            "میانه": fmt(q["med"]),
+            "بیشینه": fmt(q["hi"]),
+            "حرکت میانه": pc(q["move"]),
+            "نوسان دوره": f"{q['sig']:.2f}٪",
+        } for label, q in fc.items()]), use_container_width=True, hide_index=True)
+        st.caption(
+            "مدل، توزیع لگ‌نرمال با نوسان تحقق‌یافته و رانش محافظه‌کارانه است؛ عدد قطعی نمی‌دهد. "
+            "افق ساعتی از σ روزانه بر √۲۴ ساخته می‌شود و تا جمع شدن نمونهٔ درون‌روزی، تقریبی است."
+        )
+        st.write("")
+        p = r["panel"]
+        cur = r["price"]
+        future = [p["day"].iloc[-1] + pd.Timedelta(days=i) for i in (1, 2, 3)]
+        xs = list(p["day"].iloc[-40:]) + future
+        st.markdown('<div class="h">قیف پیش‌بینی ۳ روزه</div>', unsafe_allow_html=True)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=p["day"].iloc[-40:], y=p["close"].iloc[-40:], name="قیمت",
+                                 line=dict(color="#101828", width=2)))
+        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future,
+                                 y=[cur] + [fc["۳ روز"]["med"]] * 3, name="میانه",
+                                 line=dict(color="#f59e0b", width=2, dash="dot")))
+        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future,
+                                 y=[cur] + [fc["۳ روز"]["hi"]] * 3, name="سقف ۸۰٪",
+                                 line=dict(color="#0e9f6e", width=1), fill=None))
+        fig.add_trace(go.Scatter(x=[p["day"].iloc[-1]] + future,
+                                 y=[cur] + [fc["۳ روز"]["lo"]] * 3, name="کف ۸۰٪",
+                                 line=dict(color="#dc2626", width=1), fill="tonexty",
+                                 fillcolor="rgba(180,83,9,.10)"))
+        fig.update_layout(template="plotly_white", height=340, margin=dict(l=8, r=8, t=10, b=8),
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                          legend=dict(orientation="h", y=1.1), hovermode="x unified")
+        fig.update_yaxes(gridcolor="#eef0f6", tickformat=",")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ═══ کارنامه
+    elif page == "کارنامه":
+        bt = r["backtest"]
+        if not bt["n"]:
+            st.info("در پنجرهٔ فعلی، شرط ورود (لبه بیش از هزینه) به تعداد کافی فعال نشده؛ کارنامه خالی است.")
+        else:
+            c = st.columns(5)
+            c[0].metric("نرخ برد", f"{bt['win']:.1f}٪")
+            c[1].metric("معاملات", f"{bt['n']}")
+            c[2].metric("میانگین هر معامله", f"{bt['exp']:+.2f}٪")
+            c[3].metric("Profit Factor", f"{bt['pf']:.2f}" if bt["pf"] else "—")
+            c[4].metric("حداکثر افت", f"{bt['dd']:.1f}٪")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(y=bt["equity"] * 100, name="سرمایه", line=dict(color="#0e9f6e", width=2)))
+            fig.update_layout(template="plotly_white", height=260, margin=dict(l=8, r=8, t=10, b=8),
+                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
+            fig.update_yaxes(gridcolor="#eef0f6", ticksuffix="٪")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown('<div class="h">کالیبراسیون: احتمال گفته‌شده در برابر نتیجهٔ واقعی</div>',
+                        unsafe_allow_html=True)
+            t = bt["trades"].copy()
+            t["bucket"] = pd.cut(t["p"], bins=[0, .45, .5, .55, .6, 1],
+                                 labels=["<۴۵٪", "۴۵–۵۰٪", "۵۰–۵۵٪", "۵۵–۶۰٪", ">۶۰٪"])
+            cal = t.groupby("bucket", observed=True).agg(
+                تعداد=("p", "size"), احتمال_میانگین=("p", "mean"), نرخ_برد=("ret", lambda s: (s > 0).mean()))
+            cal["احتمال_میانگین"] = (cal["احتمال_میانگین"] * 100).round(1)
+            cal["نرخ_برد"] = (cal["نرخ_برد"] * 100).round(1)
+            st.dataframe(cal.rename(columns={"احتمال_میانگین": "احتمال میانگین (٪)",
+                                             "نرخ_برد": "نرخ برد واقعی (٪)"}),
+                         use_container_width=True)
+            st.caption("اگر ستون آخر به ستون قبل نزدیک باشد، احتمال‌ها کالیبره‌اند. اختلاف زیاد یعنی نمونه کم است.")
+
+            st.markdown('<div class="h">معاملات</div>', unsafe_allow_html=True)
+            show = bt["trades"].tail(20).iloc[::-1].copy()
+            show["day"] = pd.to_datetime(show["day"]).dt.strftime("%Y-%m-%d")
+            show["side"] = np.where(show["side"] > 0, "خرید", "فروش")
+            show["ret"] = show["ret"].round(2)
+            show["p"] = (show["p"] * 100).round(1)
+            st.dataframe(show.rename(columns={"day": "تاریخ", "side": "جهت", "ret": "بازده (٪)", "p": "احتمال (٪)"}),
+                         use_container_width=True, hide_index=True)
+
+        st.caption(
+            f"بک‌تست روی {r['n_days']} روز، گام‌به‌گام و بدون نگاه به آینده، با هزینهٔ "
+            f"{CFG['cost_pct']:.2f}٪ در هر معامله. تعداد کم معامله یعنی عدد نرخ برد هنوز شکننده است."
+        )
+
+    # ═══ داده‌ها
+    else:
+        st.markdown('<div class="h">منابع</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([
+            ("دلار آزاد", fmt(r["usd"]), "iran-market", r["usd"] is not None),
+            ("طلای ۱۸ عیار", fmt(r["price"]), "iran-market", True),
+            ("انس جهانی", fmt(r["ounce"], 1), "gold-api", r["ounce"] is not None),
+            ("نقره", fmt(safe_float((live.get("silver") or {}).get("price")), 2), "gold-api",
+             live.get("silver") is not None),
+            ("مس", fmt(safe_float((live.get("copper") or {}).get("price")), 3), "gold-api",
+             live.get("copper") is not None),
+        ], columns=["قلم", "مقدار", "منبع", "دریافت شد"]), use_container_width=True, hide_index=True)
+        st.caption(f"آخرین دریافت {fresh} · تاریخ روزانه {r['n_days']} روز · نمونه‌های محلی {len(ticks)}")
+
+        st.write("")
+        st.markdown('<div class="h">گزارش کامل</div>', unsafe_allow_html=True)
+        txt = report_text(r, fc, plan, live)
+        st.code(txt, language=None)
+        st.download_button("دانلود گزارش کامل", txt,
+                           file_name=f"report_{datetime.now():%Y%m%d_%H%M}.txt", mime="text/plain")
+        if live.get("errors"):
+            st.warning("منابع ناقص:\n\n" + "\n".join(f"- {e}" for e in live["errors"]))
+
+    st.write("")
+    st.caption("این ابزار تحلیلی است و توصیهٔ سرمایه‌گذاری نیست. هیچ ارسالی به بیرون انجام نمی‌شود.")
+
+
+if __name__ == "__main__":
+    main()
