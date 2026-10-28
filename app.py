@@ -280,15 +280,21 @@ def build_dataset():
     feat["date_g"] = feat["date"].apply(jalali_to_greg)
 
     oh = fetch_ounce_history()
+    feat["prem"] = np.nan
     if oh is not None and feat["date_g"].notna().sum() > 20:
         feat = feat.merge(oh, on="date_g", how="left")
         feat["usd"] = pd.to_numeric(feat["usd"], errors="coerce")
         theo_hist = feat["ounce"] * feat["usd"] / 31.1035 * 0.75
-        feat["prem"] = feat["gold18"] - theo_hist
-        if feat["prem"].notna().sum() < 30:
-            feat["prem"] = np.nan
+        prem = feat["gold18"] - theo_hist
+        if prem.notna().sum() >= 30:
+            feat["prem"] = prem
+    if feat["prem"].notna().sum() < 30:
+        # جایگزین پایدار: نسبت طلا به دلار — شکاف این نسبت از میانگین غلتان خودش
+        # همان گران‌بودن/ارزان‌بودن نسبی طلای داخلی را می‌سنجد، حتی بدون داده انس.
+        feat["prem"] = feat["gold18"] / feat["usd"]
+        feat["prem_proxy"] = True
     else:
-        feat["prem"] = np.nan
+        feat["prem_proxy"] = False
 
     feat["ret"] = feat["gold18"].pct_change()
     feat["ema20"] = feat["gold18"].ewm(span=20, adjust=False).mean()
@@ -326,8 +332,10 @@ def prem_z_at(d, i):
         s = d["prem"].iloc[max(0, i - 40):i + 1].dropna()
         if len(s) >= 35:
             std = s.std()
-            if std and std > 1:
-                return (s.iloc[-1] - s.mean()) / std
+            mean = s.mean()
+            # آستانه نسبی تا هم پریمیوم تومانی و هم نسبت طلا/دلار کار کند
+            if std and mean and std / abs(mean) > 0.0005:
+                return (s.iloc[-1] - mean) / std
     except Exception:
         pass
     return None
@@ -429,8 +437,10 @@ def sc_premium(d, i):
     z = prem_z_at(d, i)
     if z is None:
         return 0.0, ["سری تاریخی پریمیوم در دسترس نیست"]
+    proxy = bool(d["prem_proxy"].iloc[-1]) if "prem_proxy" in d.columns else False
+    label = "شاخص نسبی طلا/دلار" if proxy else "Z-Score پریمیوم"
     s = max(-2.4, min(2.4, -z * 1.2))
-    rs = [f"Z-Score پریمیوم = {z:+.2f}"]
+    rs = [f"{label} = {z:+.2f}"]
     if z <= -1:
         rs.append("طلای داخلی ارزان‌تر از ارزش جهانی")
     elif z >= 1:
@@ -448,7 +458,7 @@ STRATEGIES = [
     {"id": "breakout", "name": "شکست سقف/کف ۲۰روزه", "fn": sc_breakout, "thr": 1.5,
      "desc": "دنباله‌روی روند با شکست کانال Donchian و تأیید مومنتوم"},
     {"id": "premium", "name": "پریمیوم هوشمند", "fn": sc_premium, "thr": 1.0,
-     "desc": "بازگشت پریمیوم طلای داخلی به ارزش جهانی (Z-Score غلتان ۴۰روزه)"},
+     "desc": "بازگشت پریمیوم طلای داخلی به ارزش جهانی (Z-Score غلتان ۴۰روزه)؛ بدون داده انس، نسبت طلا/دلار"},
 ]
 
 
@@ -548,9 +558,12 @@ def fp(v):
 
 
 def fhit(blk):
-    """وین‌ریت یک بلوک آماری به‌صورت درصد فارسی یا —."""
+    """وین‌ریت یک بلوک آماری به‌صورت درصد فارسی یا —؛ نمونه زیر ۱۰ سیگنال علامت هشدار می‌گیرد."""
     if blk and blk.get("hit") is not None:
-        return fa(format(blk["hit"], ".0f")) + "٪"
+        s = fa(format(blk["hit"], ".0f")) + "٪"
+        if blk.get("n", 0) < 10:
+            s += " ⚠️"
+        return s
     return "—"
 
 
@@ -767,18 +780,34 @@ else:
 buy_v, sell_v, neu_v = consensus_votes(feat)
 cons = (buy_v - sell_v) / max(1, len(STRATEGIES))
 
-strat_options = []
+AUTO_LABEL = "🏆 خودکار — بهترین بر اساس فورواردتست"
+
+
+def pick_best_strategy():
+    """استراتژی با بهترین میانگین بازده در فورواردتست (حداقل ۵ سیگنال)."""
+    best, best_key = None, None
+    for s_ in STRATEGIES:
+        f = fwd.get(s_["id"])
+        if f and f.get("n", 0) >= 5 and f.get("avg_ret") is not None:
+            if best_key is None or f["avg_ret"] > best_key:
+                best, best_key = s_, f["avg_ret"]
+    return best if best is not None else STRATEGIES[0]
+
+
+strat_options = [AUTO_LABEL]
 for s_ in STRATEGIES:
-    lbl = s_["name"] + " • دقت " + fhit(bts.get(s_["id"]))
-    strat_options.append(lbl)
+    strat_options.append(s_["name"] + " • دقت " + fhit(bts.get(s_["id"])))
 
 selected = st.selectbox(
     "استراتژی سیگنال‌دهی",
     strat_options,
     index=0,
-    help="وین‌ریت هر استراتژی از بک‌تست روی داده‌های تاریخی همین نماد محاسبه می‌شود."
+    help="گزینه خودکار استراتژی با بهترین میانگین بازده در فورواردتست (حداقل ۵ سیگنال) را برمی‌گزیند. علامت ⚠️ یعنی نمونه زیر ۱۰ سیگنال و عدد از نظر آماری قابل اتکا نیست."
 )
-strat = STRATEGIES[strat_options.index(selected)]
+if selected == AUTO_LABEL:
+    strat = pick_best_strategy()
+else:
+    strat = STRATEGIES[strat_options.index(selected) - 1]
 
 if feat is not None:
     sig = run_strategy(feat, strat, cons)
@@ -910,6 +939,9 @@ with t2:
 with t3:
     row = feat.iloc[-1] if feat is not None else None
     if row is not None and not np.isnan(row["rsi"]):
+        zlab = "Z-Score پریمیوم"
+        if "prem_proxy" in feat.columns and bool(feat["prem_proxy"].iloc[-1]):
+            zlab = "شاخص نسبی طلا/دلار (تقریبی)"
         rows = [
             ("EMA20", fn(row["ema20"])),
             ("EMA50", fn(row["ema50"])),
@@ -922,7 +954,7 @@ with t3:
             ("نوسان ۱۰روزه", fa(format(row["vol10"], ".2f")) + "٪"),
             ("همبستگی با دلار", fa(format(row["corr"], ".2f")) if not np.isnan(row["corr"]) else "—"),
             ("ارزش تئوریک", fn(theo) if theo else "—"),
-            ("Z-Score پریمیوم", fa(format(z_prem, "+.2f")) if z_prem is not None else "—"),
+            (zlab, fa(format(z_prem, "+.2f")) if z_prem is not None else "—"),
         ]
         html = "<table class='ind'><tr><th>شاخص</th><th style='text-align:left'>مقدار</th></tr>"
         for n, v in rows:
@@ -933,7 +965,7 @@ with t3:
         st.warning("داده تاریخی کافی برای محاسبه اندیکاتورها نیست.")
 
 with t4:
-    st.caption("وین‌ریت = سهم سیگنال‌هایی که جهت روز بعد را درست حدس زده‌اند. فورواردتست روی ۳۰٪ آخر داده (خارج از نمونه) محاسبه می‌شود.")
+    st.caption("وین‌ریت = سهم سیگنال‌هایی که جهت روز بعد را درست حدس زده‌اند. فورواردتست روی ۳۰٪ آخر داده (خارج از نمونه) محاسبه می‌شود. علامت ⚠️ یعنی نمونه زیر ۱۰ سیگنال است.")
     if feat is not None:
         html = ("<table class='ind'><tr><th>استراتژی</th><th>سیگنال فعلی</th>"
                 "<th style='text-align:left'>وین‌ریت بک‌تست</th>"
@@ -989,7 +1021,7 @@ with t5:
                          f"<td class='v'>{b_s}</td></tr>")
         html += "</table>"
         st.markdown(html, unsafe_allow_html=True)
-        st.info("فورواردتست معتبرترین سنجه است: عملکرد استراتژی روی داده‌ای که در ساختن یا تنظیم آن هیچ نقشی نداشته. اگر وین‌ریت فوروارد نزدیک بک‌تست باشد، استراتژی پایدار است.")
+        st.info("فورواردتست معتبرترین سنجه است: عملکرد استراتژی روی داده‌ای که در ساختن یا تنظیم آن هیچ نقشی نداشته. اگر وین‌ریت فوروارد نزدیک بک‌تست باشد، استراتژی پایدار است. ردیف‌های با علامت ⚠️ نمونه زیر ۱۰ سیگنال دارند.")
     else:
         st.warning("داده تاریخی کافی برای بک‌تست و فورواردتست نیست.")
 
